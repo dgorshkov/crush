@@ -1,65 +1,21 @@
 package fsext
 
 import (
+	"context"
+	"errors"
 	"fmt"
-	"log/slog"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/bmatcuk/doublestar/v4"
 	"github.com/charlievieth/fastwalk"
-	"github.com/charmbracelet/crush/internal/log"
-
-	ignore "github.com/sabhiram/go-gitignore"
+	"github.com/charmbracelet/crush/internal/csync"
+	"github.com/charmbracelet/crush/internal/home"
+	"github.com/charmbracelet/x/ansi"
 )
-
-var rgPath string
-
-func init() {
-	var err error
-	rgPath, err = exec.LookPath("rg")
-	if err != nil {
-		if log.Initialized() {
-			slog.Warn("Ripgrep (rg) not found in $PATH. Some grep features might be limited or slower.")
-		}
-	}
-}
-
-func GetRgCmd(globPattern string) *exec.Cmd {
-	if rgPath == "" {
-		return nil
-	}
-	rgArgs := []string{
-		"--files",
-		"-L",
-		"--null",
-	}
-	if globPattern != "" {
-		if !filepath.IsAbs(globPattern) && !strings.HasPrefix(globPattern, "/") {
-			globPattern = "/" + globPattern
-		}
-		rgArgs = append(rgArgs, "--glob", globPattern)
-	}
-	return exec.Command(rgPath, rgArgs...)
-}
-
-func GetRgSearchCmd(pattern, path, include string) *exec.Cmd {
-	if rgPath == "" {
-		return nil
-	}
-	// Use -n to show line numbers and include the matched line
-	args := []string{"-H", "-n", pattern}
-	if include != "" {
-		args = append(args, "--glob", include)
-	}
-	args = append(args, path)
-
-	return exec.Command(rgPath, args...)
-}
 
 type FileInfo struct {
 	Path    string
@@ -88,8 +44,6 @@ func SkipHidden(path string) bool {
 		"obj":              true,
 		"out":              true,
 		"coverage":         true,
-		"tmp":              true,
-		"temp":             true,
 		"logs":             true,
 		"generated":        true,
 		"bower_components": true,
@@ -106,73 +60,92 @@ func SkipHidden(path string) bool {
 }
 
 // FastGlobWalker provides gitignore-aware file walking with fastwalk
+// It uses hierarchical ignore checking like git does, checking .gitignore/.crushignore
+// files in each directory from the root to the target path.
 type FastGlobWalker struct {
-	gitignore *ignore.GitIgnore
-	rootPath  string
+	directoryLister *directoryLister
 }
 
 func NewFastGlobWalker(searchPath string) *FastGlobWalker {
-	walker := &FastGlobWalker{
-		rootPath: searchPath,
+	return &FastGlobWalker{
+		directoryLister: NewDirectoryLister(searchPath),
 	}
-
-	// Load gitignore if it exists
-	gitignorePath := filepath.Join(searchPath, ".gitignore")
-	if _, err := os.Stat(gitignorePath); err == nil {
-		if gi, err := ignore.CompileIgnoreFile(gitignorePath); err == nil {
-			walker.gitignore = gi
-		}
-	}
-
-	return walker
 }
 
-func (w *FastGlobWalker) shouldSkip(path string) bool {
-	if SkipHidden(path) {
-		return true
-	}
-
-	if w.gitignore != nil {
-		relPath, err := filepath.Rel(w.rootPath, path)
-		if err == nil && w.gitignore.MatchesPath(relPath) {
-			return true
-		}
-	}
-
-	return false
+// ShouldSkip checks if a file path should be skipped based on hierarchical gitignore,
+// crushignore, and hidden file rules.
+func (w *FastGlobWalker) ShouldSkip(path string) bool {
+	return w.directoryLister.shouldIgnore(path, nil, false)
 }
 
-func GlobWithDoubleStar(pattern, searchPath string, limit int) ([]string, bool, error) {
+// ShouldSkipDir checks if a directory path should be skipped based on hierarchical
+// gitignore, crushignore, and hidden file rules.
+func (w *FastGlobWalker) ShouldSkipDir(path string) bool {
+	return w.directoryLister.shouldIgnore(path, nil, true)
+}
+
+// Glob globs files.
+//
+// Does not respect gitignore.
+func Glob(pattern string, cwd string, limit int) ([]string, bool, error) {
+	return globWithDoubleStar(context.Background(), pattern, cwd, limit, false)
+}
+
+// GlobGitignoreAware globs files respecting gitignore.
+func GlobGitignoreAware(pattern string, cwd string, limit int) ([]string, bool, error) {
+	return globWithDoubleStar(context.Background(), pattern, cwd, limit, true)
+}
+
+// GlobGitignoreAwareCtx is like [GlobGitignoreAware] but stops early when ctx
+// is cancelled (e.g. on timeout), returning whatever was found so far.
+func GlobGitignoreAwareCtx(ctx context.Context, pattern, cwd string, limit int) ([]string, bool, error) {
+	return globWithDoubleStar(ctx, pattern, cwd, limit, true)
+}
+
+func globWithDoubleStar(ctx context.Context, pattern, searchPath string, limit int, gitignore bool) ([]string, bool, error) {
+	// Normalize pattern to forward slashes on Windows so their config can use
+	// backslashes
+	pattern = filepath.ToSlash(pattern)
+
 	walker := NewFastGlobWalker(searchPath)
-	var matches []FileInfo
+	found := csync.NewSlice[FileInfo]()
 	conf := fastwalk.Config{
-		Follow: true,
-		// Use forward slashes when running a Windows binary under WSL or MSYS
+		// Do not follow symlinks: following them lets the walk escape the
+		// search root (into module caches, the nix store, $HOME, etc.) and
+		// chase cycles, which is slow and can hang. Mirrors the rg path,
+		// which no longer passes -L.
+		Follow:  false,
 		ToSlash: fastwalk.DefaultToSlash(),
 		Sort:    fastwalk.SortFilesFirst,
 	}
 	err := fastwalk.Walk(&conf, searchPath, func(path string, d os.DirEntry, err error) error {
+		if ctx.Err() != nil {
+			return filepath.SkipAll // Timed out or cancelled; stop walking.
+		}
 		if err != nil {
 			return nil // Skip files we can't access
 		}
 
-		if d.IsDir() {
-			if walker.shouldSkip(path) {
+		isDir := d.IsDir()
+		if isDir {
+			if gitignore && walker.ShouldSkipDir(path) {
 				return filepath.SkipDir
 			}
-			return nil
+		} else {
+			if gitignore && walker.ShouldSkip(path) {
+				return nil
+			}
 		}
 
-		if walker.shouldSkip(path) {
-			return nil
-		}
-
-		// Check if path matches the pattern
 		relPath, err := filepath.Rel(searchPath, path)
 		if err != nil {
 			relPath = path
 		}
 
+		// Normalize separators to forward slashes
+		relPath = filepath.ToSlash(relPath)
+
+		// Check if path matches the pattern
 		matched, err := doublestar.Match(pattern, relPath)
 		if err != nil || !matched {
 			return nil
@@ -183,40 +156,39 @@ func GlobWithDoubleStar(pattern, searchPath string, limit int) ([]string, bool, 
 			return nil
 		}
 
-		matches = append(matches, FileInfo{Path: path, ModTime: info.ModTime()})
-		if limit > 0 && len(matches) >= limit*2 {
+		found.Append(FileInfo{Path: path, ModTime: info.ModTime()})
+		if limit > 0 && found.Len() >= limit*2 { // NOTE: why x2?
 			return filepath.SkipAll
 		}
 		return nil
 	})
-	if err != nil {
+	if err != nil && !errors.Is(err, filepath.SkipAll) {
 		return nil, false, fmt.Errorf("fastwalk error: %w", err)
 	}
 
-	sort.Slice(matches, func(i, j int) bool {
-		return matches[i].ModTime.After(matches[j].ModTime)
+	matches := slices.SortedFunc(found.Seq(), func(a, b FileInfo) int {
+		return b.ModTime.Compare(a.ModTime)
 	})
-
-	truncated := false
-	if limit > 0 && len(matches) > limit {
-		matches = matches[:limit]
-		truncated = true
-	}
+	matches, truncated := truncate(matches, limit)
 
 	results := make([]string, len(matches))
 	for i, m := range matches {
 		results[i] = m.Path
 	}
-	return results, truncated, nil
+	return results, truncated || errors.Is(err, filepath.SkipAll), nil
+}
+
+// ShouldExcludeFile checks if a file should be excluded from processing
+// based on common patterns and ignore rules.
+func ShouldExcludeFile(rootPath, filePath string) bool {
+	info, err := os.Stat(filePath)
+	isDir := err == nil && info.IsDir()
+	return NewDirectoryLister(rootPath).
+		shouldIgnore(filePath, nil, isDir)
 }
 
 func PrettyPath(path string) string {
-	// replace home directory with ~
-	homeDir, err := os.UserHomeDir()
-	if err == nil {
-		path = strings.ReplaceAll(path, homeDir, "~")
-	}
-	return path
+	return home.Short(path)
 }
 
 func DirTrim(pwd string, lim int) string {
@@ -233,7 +205,11 @@ func DirTrim(pwd string, lim int) string {
 		if i == len(dirs)-1 {
 			out = dirs[i]
 		} else if i >= len(dirs)-lim {
-			out = string(dirs[i][0]) + out
+			// Keep the first grapheme cluster, not the first byte: CJK,
+			// combining marks, and emoji can span multiple bytes and runes,
+			// so a byte or single rune would render the wrong character.
+			first, _ := ansi.FirstGraphemeCluster(dirs[i], ansi.GraphemeWidth)
+			out = first + out
 		} else {
 			out = "..." + out
 			break
@@ -241,4 +217,47 @@ func DirTrim(pwd string, lim int) string {
 	}
 	out = filepath.Join("~", out)
 	return out
+}
+
+// PathOrPrefix returns the prefix if the path starts with it, or falls back to
+// the path otherwise.
+func PathOrPrefix(path, prefix string) string {
+	if HasPrefix(path, prefix) {
+		return prefix
+	}
+	return path
+}
+
+// HasPrefix checks if the given path starts with the specified prefix.
+// Uses filepath.Rel to determine if path is within prefix.
+func HasPrefix(path, prefix string) bool {
+	rel, err := filepath.Rel(prefix, path)
+	if err != nil {
+		return false
+	}
+	// If path is within prefix, Rel will not return a path starting with ".."
+	return !strings.HasPrefix(rel, "..")
+}
+
+// ToUnixLineEndings converts Windows line endings (CRLF) to Unix line endings (LF).
+func ToUnixLineEndings(content string) (string, bool) {
+	if strings.Contains(content, "\r\n") {
+		return strings.ReplaceAll(content, "\r\n", "\n"), true
+	}
+	return content, false
+}
+
+// ToWindowsLineEndings converts Unix line endings (LF) to Windows line endings (CRLF).
+func ToWindowsLineEndings(content string) (string, bool) {
+	if !strings.Contains(content, "\r\n") {
+		return strings.ReplaceAll(content, "\n", "\r\n"), true
+	}
+	return content, false
+}
+
+func truncate[T any](input []T, limit int) ([]T, bool) {
+	if limit > 0 && len(input) > limit {
+		return input[:limit], true
+	}
+	return input, false
 }

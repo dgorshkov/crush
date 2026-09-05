@@ -27,6 +27,25 @@ func NewMapFrom[K comparable, V any](m map[K]V) *Map[K, V] {
 	}
 }
 
+// NewLazyMap creates a new lazy-loaded map. The provided load function is
+// executed in a separate goroutine to populate the map.
+func NewLazyMap[K comparable, V any](load func() map[K]V) *Map[K, V] {
+	m := &Map[K, V]{}
+	m.mu.Lock()
+	go func() {
+		defer m.mu.Unlock()
+		m.inner = load()
+	}()
+	return m
+}
+
+// Reset replaces the inner map with the new one.
+func (m *Map[K, V]) Reset(input map[K]V) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.inner = input
+}
+
 // Set sets the value for the specified key in the map.
 func (m *Map[K, V]) Set(key K, value V) {
 	m.mu.Lock()
@@ -39,6 +58,25 @@ func (m *Map[K, V]) Del(key K) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	delete(m.inner, key)
+}
+
+// CompareAndDelete deletes the key only if the current value matches the
+// expected pointer. Returns true if the deletion occurred. This is the
+// ABA-safe cleanup primitive: it prevents a deferred cleanup from removing
+// a value that was replaced by a newer writer in the window between the
+// explicit Del and the deferred Del.
+func (m *Map[K, V]) CompareAndDelete(key K, expected any) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	current, ok := m.inner[key]
+	if !ok {
+		return false
+	}
+	if any(current) != expected {
+		return false
+	}
+	delete(m.inner, key)
+	return true
 }
 
 // Get gets the value for the specified key from the map.
@@ -56,6 +94,18 @@ func (m *Map[K, V]) Len() int {
 	return len(m.inner)
 }
 
+// GetOrSet gets and returns the key if it exists, otherwise, it executes the
+// given function, set its return value for the given key, and returns it.
+func (m *Map[K, V]) GetOrSet(key K, fn func() V) V {
+	got, ok := m.Get(key)
+	if ok {
+		return got
+	}
+	value := fn()
+	m.Set(key, value)
+	return value
+}
+
 // Take gets an item and then deletes it.
 func (m *Map[K, V]) Take(key K) (V, bool) {
 	m.mu.Lock()
@@ -65,12 +115,16 @@ func (m *Map[K, V]) Take(key K) (V, bool) {
 	return v, ok
 }
 
+// Copy returns a copy of the inner map.
+func (m *Map[K, V]) Copy() map[K]V {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return maps.Clone(m.inner)
+}
+
 // Seq2 returns an iter.Seq2 that yields key-value pairs from the map.
 func (m *Map[K, V]) Seq2() iter.Seq2[K, V] {
-	dst := make(map[K]V)
-	m.mu.RLock()
-	maps.Copy(dst, m.inner)
-	m.mu.RUnlock()
+	dst := m.Copy()
 	return func(yield func(K, V) bool) {
 		for k, v := range dst {
 			if !yield(k, v) {
@@ -96,6 +150,9 @@ var (
 	_ json.Marshaler   = &Map[string, any]{}
 )
 
+// JSONSchemaAlias returns the underlying map type for JSON schema generation.
+// Value receiver is required because github.com/invopop/jsonschema checks
+// interface satisfaction on the non-pointer type after stripping pointers.
 func (Map[K, V]) JSONSchemaAlias() any { //nolint
 	m := map[K]V{}
 	return m

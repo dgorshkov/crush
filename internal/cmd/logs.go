@@ -10,8 +10,10 @@ import (
 	"slices"
 	"time"
 
+	"charm.land/log/v2"
+	"github.com/charmbracelet/colorprofile"
 	"github.com/charmbracelet/crush/internal/config"
-	"github.com/charmbracelet/log/v2"
+	"github.com/charmbracelet/x/term"
 	"github.com/nxadm/tail"
 	"github.com/spf13/cobra"
 )
@@ -28,6 +30,11 @@ var logsCmd = &cobra.Command{
 			return fmt.Errorf("failed to get current working directory: %v", err)
 		}
 
+		dataDir, err := cmd.Flags().GetString("data-dir")
+		if err != nil {
+			return fmt.Errorf("failed to get data directory: %v", err)
+		}
+
 		follow, err := cmd.Flags().GetBool("follow")
 		if err != nil {
 			return fmt.Errorf("failed to get follow flag: %v", err)
@@ -40,12 +47,15 @@ var logsCmd = &cobra.Command{
 
 		log.SetLevel(log.DebugLevel)
 		log.SetOutput(os.Stdout)
+		if !term.IsTerminal(os.Stdout.Fd()) {
+			log.SetColorProfile(colorprofile.NoTTY)
+		}
 
-		cfg, err := config.Load(cwd, false)
+		cfg, err := config.Load(cwd, dataDir, false)
 		if err != nil {
 			return fmt.Errorf("failed to load configuration: %v", err)
 		}
-		logsFile := filepath.Join(cfg.WorkingDir(), cfg.Options.DataDirectory, "logs", "crush.log")
+		logsFile := filepath.Join(cfg.Config().Options.DataDirectory, "logs", "crush.log")
 		_, err = os.Stat(logsFile)
 		if os.IsNotExist(err) {
 			log.Warn("Looks like you are not in a crush project. No logs found.")
@@ -63,7 +73,6 @@ var logsCmd = &cobra.Command{
 func init() {
 	logsCmd.Flags().BoolP("follow", "f", false, "Follow log output")
 	logsCmd.Flags().IntP("tail", "t", defaultTailLines, "Show only the last N lines default: 1000 for performance")
-	rootCmd.AddCommand(logsCmd)
 }
 
 func followLogs(ctx context.Context, logsFile string, tailLines int) error {
@@ -162,8 +171,8 @@ func printLogLine(lineText string) {
 	}
 	msg := data["msg"]
 	level := data["level"]
-	otherData := []any{}
-	keys := []string{}
+	var otherData []any
+	var keys []string
 	for k := range data {
 		keys = append(keys, k)
 	}

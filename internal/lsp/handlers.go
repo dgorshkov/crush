@@ -1,22 +1,32 @@
 package lsp
 
 import (
+	"context"
 	"encoding/json"
 	"log/slog"
 
-	"github.com/charmbracelet/crush/internal/config"
-
-	"github.com/charmbracelet/crush/internal/lsp/protocol"
 	"github.com/charmbracelet/crush/internal/lsp/util"
+	powernap "github.com/charmbracelet/x/powernap/pkg/lsp"
+	"github.com/charmbracelet/x/powernap/pkg/lsp/protocol"
 )
 
-// Requests
-
-func HandleWorkspaceConfiguration(params json.RawMessage) (any, error) {
+// HandleWorkspaceConfiguration handles workspace configuration requests
+func HandleWorkspaceConfiguration(_ context.Context, _ string, params json.RawMessage) (any, error) {
 	return []map[string]any{{}}, nil
 }
 
-func HandleRegisterCapability(params json.RawMessage) (any, error) {
+// HandleWorkDoneProgressCreate handles server-initiated window/workDoneProgress/create
+// requests. The client advertises window.workDoneProgress: true in its capabilities
+// (see makeClientCapabilities in powernap), which per the LSP spec grants servers
+// permission to send this request — so it must be answered, even as a no-op, or the
+// server (e.g. typescript-language-server) treats the unhandled response as fatal and
+// crashes. See github.com/charmbracelet/x issue tracking powernap capability gaps.
+func HandleWorkDoneProgressCreate(_ context.Context, _ string, _ json.RawMessage) (any, error) {
+	return nil, nil
+}
+
+// HandleRegisterCapability handles capability registration requests
+func HandleRegisterCapability(_ context.Context, _ string, params json.RawMessage) (any, error) {
 	var registerParams protocol.RegistrationParams
 	if err := json.Unmarshal(params, &registerParams); err != nil {
 		slog.Error("Error unmarshaling registration params", "error", err)
@@ -32,34 +42,34 @@ func HandleRegisterCapability(params json.RawMessage) (any, error) {
 				slog.Error("Error marshaling registration options", "error", err)
 				continue
 			}
-
 			var options protocol.DidChangeWatchedFilesRegistrationOptions
 			if err := json.Unmarshal(optionsJSON, &options); err != nil {
 				slog.Error("Error unmarshaling registration options", "error", err)
 				continue
 			}
-
 			// Store the file watchers registrations
 			notifyFileWatchRegistration(reg.ID, options.Watchers)
 		}
 	}
-
 	return nil, nil
 }
 
-func HandleApplyEdit(params json.RawMessage) (any, error) {
-	var edit protocol.ApplyWorkspaceEditParams
-	if err := json.Unmarshal(params, &edit); err != nil {
-		return nil, err
-	}
+// HandleApplyEdit handles workspace edit requests
+func HandleApplyEdit(encoding powernap.OffsetEncoding) func(_ context.Context, _ string, params json.RawMessage) (any, error) {
+	return func(_ context.Context, _ string, params json.RawMessage) (any, error) {
+		var edit protocol.ApplyWorkspaceEditParams
+		if err := json.Unmarshal(params, &edit); err != nil {
+			return nil, err
+		}
 
-	err := util.ApplyWorkspaceEdit(edit.Edit)
-	if err != nil {
-		slog.Error("Error applying workspace edit", "error", err)
-		return protocol.ApplyWorkspaceEditResult{Applied: false, FailureReason: err.Error()}, nil
-	}
+		err := util.ApplyWorkspaceEdit(edit.Edit, encoding)
+		if err != nil {
+			slog.Error("Error applying workspace edit", "error", err)
+			return protocol.ApplyWorkspaceEditResult{Applied: false, FailureReason: err.Error()}, nil
+		}
 
-	return protocol.ApplyWorkspaceEditResult{Applied: true}, nil
+		return protocol.ApplyWorkspaceEditResult{Applied: true}, nil
+	}
 }
 
 // FileWatchRegistrationHandler is a function that will be called when file watch registrations are received
@@ -80,21 +90,27 @@ func notifyFileWatchRegistration(id string, watchers []protocol.FileSystemWatche
 	}
 }
 
-// Notifications
-
-func HandleServerMessage(params json.RawMessage) {
-	cfg := config.Get()
-	var msg struct {
-		Type    int    `json:"type"`
-		Message string `json:"message"`
+// HandleServerMessage handles server messages
+func HandleServerMessage(_ context.Context, method string, params json.RawMessage) {
+	var msg protocol.ShowMessageParams
+	if err := json.Unmarshal(params, &msg); err != nil {
+		slog.Debug("Error unmarshal server message", "error", err)
+		return
 	}
-	if err := json.Unmarshal(params, &msg); err == nil {
-		if cfg.Options.DebugLSP {
-			slog.Debug("Server message", "type", msg.Type, "message", msg.Message)
-		}
+
+	switch msg.Type {
+	case protocol.Error:
+		slog.Error("LSP Server", "message", msg.Message)
+	case protocol.Warning:
+		slog.Warn("LSP Server", "message", msg.Message)
+	case protocol.Info:
+		slog.Info("LSP Server", "message", msg.Message)
+	case protocol.Log:
+		slog.Debug("LSP Server", "message", msg.Message)
 	}
 }
 
+// HandleDiagnostics handles diagnostic notifications from the LSP server
 func HandleDiagnostics(client *Client, params json.RawMessage) {
 	var diagParams protocol.PublishDiagnosticsParams
 	if err := json.Unmarshal(params, &diagParams); err != nil {
@@ -102,8 +118,16 @@ func HandleDiagnostics(client *Client, params json.RawMessage) {
 		return
 	}
 
-	client.diagnosticsMu.Lock()
-	defer client.diagnosticsMu.Unlock()
+	client.diagnostics.Set(diagParams.URI, diagParams.Diagnostics)
 
-	client.diagnostics[diagParams.URI] = diagParams.Diagnostics
+	// Calculate total diagnostic count
+	totalCount := 0
+	for _, diagnostics := range client.diagnostics.Seq2() {
+		totalCount += len(diagnostics)
+	}
+
+	// Trigger callback if set
+	if client.onDiagnosticsChanged != nil {
+		client.onDiagnosticsChanged(client.name, totalCount)
+	}
 }

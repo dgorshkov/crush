@@ -4,7 +4,10 @@ import (
 	"encoding/json"
 	"maps"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"testing/synctest"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -36,6 +39,56 @@ func TestNewMapFrom(t *testing.T) {
 	require.Equal(t, 1, value)
 }
 
+func TestNewLazyMap(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		t.Helper()
+
+		waiter := sync.Mutex{}
+		waiter.Lock()
+		var loadCalled atomic.Bool
+
+		loadFunc := func() map[string]int {
+			waiter.Lock()
+			defer waiter.Unlock()
+			loadCalled.Store(true)
+			return map[string]int{
+				"key1": 1,
+				"key2": 2,
+			}
+		}
+
+		m := NewLazyMap(loadFunc)
+		require.NotNil(t, m)
+
+		waiter.Unlock() // Allow the load function to proceed
+		time.Sleep(100 * time.Millisecond)
+		require.True(t, loadCalled.Load())
+		require.Equal(t, 2, m.Len())
+
+		value, ok := m.Get("key1")
+		require.True(t, ok)
+		require.Equal(t, 1, value)
+	})
+}
+
+func TestMap_Reset(t *testing.T) {
+	t.Parallel()
+
+	m := NewMapFrom(map[string]int{
+		"a": 10,
+	})
+
+	m.Reset(map[string]int{
+		"b": 20,
+	})
+	value, ok := m.Get("b")
+	require.True(t, ok)
+	require.Equal(t, 20, value)
+	require.Equal(t, 1, m.Len())
+}
+
 func TestMap_Set(t *testing.T) {
 	t.Parallel()
 
@@ -51,6 +104,16 @@ func TestMap_Set(t *testing.T) {
 	value, ok = m.Get("key1")
 	require.True(t, ok)
 	require.Equal(t, 100, value)
+	require.Equal(t, 1, m.Len())
+}
+
+func TestMap_GetOrSet(t *testing.T) {
+	t.Parallel()
+
+	m := NewMap[string, int]()
+
+	require.Equal(t, 42, m.GetOrSet("key1", func() int { return 42 }))
+	require.Equal(t, 42, m.GetOrSet("key1", func() int { return 99999 }))
 	require.Equal(t, 1, m.Len())
 }
 
@@ -108,6 +171,36 @@ func TestMap_Len(t *testing.T) {
 
 	m.Del("key2")
 	require.Equal(t, 0, m.Len())
+}
+
+// TestMap_CompareAndDelete verifies that CompareAndDelete only removes the
+// entry when the stored pointer matches the expected value. This is the
+// ABA-safe cleanup primitive used by the dispatch completion path to prevent
+// a deferred cleanup from wiping a newer run's entry.
+func TestMap_CompareAndDelete(t *testing.T) {
+	t.Parallel()
+
+	type entry struct{ val int }
+	m := NewMap[string, *entry]()
+
+	original := &entry{val: 1}
+	m.Set("k", original)
+
+	// Matching pointer: deletion succeeds.
+	require.True(t, m.CompareAndDelete("k", any(original)))
+	_, ok := m.Get("k")
+	require.False(t, ok)
+
+	// Re-set with a new value, try to delete with the stale pointer.
+	second := &entry{val: 2}
+	m.Set("k", second)
+	require.False(t, m.CompareAndDelete("k", any(original)), "stale pointer must not delete")
+	got, ok := m.Get("k")
+	require.True(t, ok)
+	require.Equal(t, 2, got.val)
+
+	// Missing key: returns false.
+	require.False(t, m.CompareAndDelete("absent", any(original)))
 }
 
 func TestMap_Take(t *testing.T) {

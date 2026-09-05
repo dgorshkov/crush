@@ -22,15 +22,15 @@ jobs:
           github.event.comment.body == 'recheck' ||
           github.event.comment.body == 'I have read the Contributor License Agreement (CLA) and hereby sign the CLA.' ||
           github.event_name == 'pull_request_target'
-        uses: contributor-assistant/github-action@v2.6.1
+        uses: contributor-assistant/github-action@58daaf842ac3e26d08c2bdf26770d6e9c5b965a9
         env:
-          GITHUB_TOKEN: ${{ secrets.CRUSH_CLA_BOT }}
+          GITHUB_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
         with:
           path-to-signatures: ".github/cla-signatures.json"
           path-to-document: "https://github.com/charmbracelet/crush/blob/main/CLA.md"
           branch: "main"
-          allowlist: dependabot[bot]
+          allowlist: charmcli,charmcrush,dependabot[bot],Copilot
           custom-pr-sign-comment: "I have read the Contributor License Agreement (CLA) and hereby sign the CLA."
-          custom-notsigned-precomment: "Thank you for your submission. We really appreciate it! Like many open-source projects, we ask that you sign our [Contributor License Agreement](https://github.com/charmbracelet/crush/blob/main/CLA.md) before we can accept your contribution. You can sign the CLA by just posting a Pull Request comment same as the below format."
+          custom-notsigned-prcomment: "Thank you for your submission. We really appreciate it! Like many open-source projects, we ask that you sign our [Contributor License Agreement](https://github.com/charmbracelet/crush/blob/main/CLA.md) before we can accept your contribution. You can sign the CLA by just posting a Pull Request comment same as the below format."
           lock-pullrequest-aftermerge: false
           signed-commit-message: "chore(legal): @$contributorName has signed the CLA"

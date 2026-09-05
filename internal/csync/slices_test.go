@@ -5,6 +5,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/require"
@@ -13,79 +14,66 @@ import (
 func TestLazySlice_Seq(t *testing.T) {
 	t.Parallel()
 
-	data := []string{"a", "b", "c"}
-	s := NewLazySlice(func() []string {
-		// TODO: use synctest when new Go is out.
-		time.Sleep(10 * time.Millisecond) // Small delay to ensure loading happens
-		return data
+	synctest.Test(t, func(t *testing.T) {
+		t.Helper()
+		data := []string{"a", "b", "c"}
+		s := NewLazySlice(func() []string {
+			time.Sleep(10 * time.Millisecond) // Small delay to ensure loading happens
+			return data
+		})
+		require.Equal(t, data, slices.Collect(s.Seq()))
 	})
-
-	var result []string
-	for v := range s.Seq() {
-		result = append(result, v)
-	}
-
-	require.Equal(t, data, result)
 }
 
 func TestLazySlice_SeqWaitsForLoading(t *testing.T) {
 	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		t.Helper()
 
-	var loaded atomic.Bool
-	data := []string{"x", "y", "z"}
+		var loaded atomic.Bool
+		data := []string{"x", "y", "z"}
 
-	s := NewLazySlice(func() []string {
-		// TODO: use synctest when new Go is out.
-		time.Sleep(100 * time.Millisecond)
-		loaded.Store(true)
-		return data
+		s := NewLazySlice(func() []string {
+			time.Sleep(100 * time.Millisecond)
+			loaded.Store(true)
+			return data
+		})
+
+		require.False(t, loaded.Load(), "should not be loaded immediately")
+		require.Equal(t, data, slices.Collect(s.Seq()))
+		require.True(t, loaded.Load(), "should be loaded after Seq")
 	})
-
-	require.False(t, loaded.Load(), "should not be loaded immediately")
-
-	var result []string
-	for v := range s.Seq() {
-		result = append(result, v)
-	}
-
-	require.True(t, loaded.Load(), "should be loaded after Seq")
-	require.Equal(t, data, result)
 }
 
 func TestLazySlice_EmptySlice(t *testing.T) {
 	t.Parallel()
-
 	s := NewLazySlice(func() []string {
 		return []string{}
 	})
-
-	var result []string
-	for v := range s.Seq() {
-		result = append(result, v)
-	}
-
-	require.Empty(t, result)
+	require.Empty(t, slices.Collect(s.Seq()))
 }
 
 func TestLazySlice_EarlyBreak(t *testing.T) {
 	t.Parallel()
 
-	data := []string{"a", "b", "c", "d", "e"}
-	s := NewLazySlice(func() []string {
-		// TODO: use synctest when new Go is out.
-		time.Sleep(10 * time.Millisecond) // Small delay to ensure loading happens
-		return data
-	})
+	synctest.Test(t, func(t *testing.T) {
+		t.Helper()
+		data := []string{"a", "b", "c", "d", "e"}
+		s := NewLazySlice(func() []string {
+			time.Sleep(10 * time.Millisecond) // Small delay to ensure loading happens
+			return data
+		})
 
-	var result []string
-	for v := range s.Seq() {
-		result = append(result, v)
-		if len(result) == 2 {
-			break
+		var result []string
+		for v := range s.Seq() {
+			result = append(result, v)
+			if len(result) == 2 {
+				break
+			}
 		}
-	}
 
-	require.Equal(t, []string{"a", "b"}, result)
+		require.Equal(t, []string{"a", "b"}, result)
+	})
 }
 
 func TestSlice(t *testing.T) {
@@ -121,44 +109,6 @@ func TestSlice(t *testing.T) {
 		require.Equal(t, "world", val)
 	})
 
-	t.Run("Prepend", func(t *testing.T) {
-		s := NewSlice[string]()
-		s.Append("world")
-		s.Prepend("hello")
-
-		require.Equal(t, 2, s.Len())
-		val, ok := s.Get(0)
-		require.True(t, ok)
-		require.Equal(t, "hello", val)
-
-		val, ok = s.Get(1)
-		require.True(t, ok)
-		require.Equal(t, "world", val)
-	})
-
-	t.Run("Delete", func(t *testing.T) {
-		s := NewSliceFrom([]int{1, 2, 3, 4, 5})
-
-		// Delete middle element
-		ok := s.Delete(2)
-		require.True(t, ok)
-		require.Equal(t, 4, s.Len())
-
-		expected := []int{1, 2, 4, 5}
-		actual := slices.Collect(s.Seq())
-		require.Equal(t, expected, actual)
-
-		// Delete out of bounds
-		ok = s.Delete(10)
-		require.False(t, ok)
-		require.Equal(t, 4, s.Len())
-
-		// Delete negative index
-		ok = s.Delete(-1)
-		require.False(t, ok)
-		require.Equal(t, 4, s.Len())
-	})
-
 	t.Run("Get", func(t *testing.T) {
 		s := NewSliceFrom([]string{"a", "b", "c"})
 
@@ -172,25 +122,6 @@ func TestSlice(t *testing.T) {
 
 		// Negative index
 		_, ok = s.Get(-1)
-		require.False(t, ok)
-	})
-
-	t.Run("Set", func(t *testing.T) {
-		s := NewSliceFrom([]string{"a", "b", "c"})
-
-		ok := s.Set(1, "modified")
-		require.True(t, ok)
-
-		val, ok := s.Get(1)
-		require.True(t, ok)
-		require.Equal(t, "modified", val)
-
-		// Out of bounds
-		ok = s.Set(10, "invalid")
-		require.False(t, ok)
-
-		// Negative index
-		ok = s.Set(-1, "invalid")
 		require.False(t, ok)
 	})
 

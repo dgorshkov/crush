@@ -1,13 +1,12 @@
 // Package shell provides cross-platform shell execution capabilities.
 //
-// This package offers two main types:
-// - Shell: A general-purpose shell executor for one-off or managed commands
-// - PersistentShell: A singleton shell that maintains state across the application
+// This package provides Shell instances for executing commands with their own
+// working directory and environment. Each shell execution is independent.
 //
 // WINDOWS COMPATIBILITY:
-// This implementation provides both POSIX shell emulation (mvdan.cc/sh/v3),
-// even on Windows. Some caution has to be taken: commands should have forward
-// slashes (/) as path separators to work, even on Windows.
+// This implementation provides POSIX shell emulation (mvdan.cc/sh/v3) even on
+// Windows. Commands should use forward slashes (/) as path separators to work
+// correctly on all platforms.
 package shell
 
 import (
@@ -15,11 +14,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 
-	"mvdan.cc/sh/v3/expand"
+	"github.com/charmbracelet/x/exp/slice"
 	"mvdan.cc/sh/v3/interp"
 	"mvdan.cc/sh/v3/syntax"
 )
@@ -32,6 +33,20 @@ const (
 	ShellTypeCmd
 	ShellTypePowerShell
 )
+
+// CrushEnvMarkers returns a fresh slice of the environment variables that
+// Crush unconditionally sets on every shell it spawns — both the interactive
+// bash tool's [Shell] and the hook runner's [Run] calls. Tools that want to
+// detect "am I being invoked by an AI agent?" can check any of these.
+// Keeping them in one place guarantees the two shell surfaces cannot drift.
+// A fresh slice is returned on every call so callers may append freely.
+func CrushEnvMarkers() []string {
+	return []string{
+		"CRUSH=1",
+		"AGENT=crush",
+		"AI_AGENT=crush",
+	}
+}
 
 // Logger interface for optional logging
 type Logger interface {
@@ -79,6 +94,14 @@ func NewShell(opts *Options) *Shell {
 		env = os.Environ()
 	}
 
+	// Strip herdr pane-ownership vars so subprocesses (including test
+	// binaries and nested crush instances) can't attach to or release
+	// the parent pane's agent authority.
+	env = withoutHerdrEnv(env)
+
+	// Allow tools to detect execution by Crush.
+	env = append(env, CrushEnvMarkers()...)
+
 	logger := opts.Logger
 	if logger == nil {
 		logger = noopLogger{}
@@ -97,7 +120,15 @@ func (s *Shell) Exec(ctx context.Context, command string) (string, string, error
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	return s.execPOSIX(ctx, command)
+	return s.exec(ctx, command)
+}
+
+// ExecStream executes a command in the shell with streaming output to provided writers
+func (s *Shell) ExecStream(ctx context.Context, command string, stdout, stderr io.Writer) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.execStream(ctx, command, stdout, stderr)
 }
 
 // GetWorkingDir returns the current working directory
@@ -155,86 +186,112 @@ func (s *Shell) SetBlockFuncs(blockFuncs []BlockFunc) {
 }
 
 // CommandsBlocker creates a BlockFunc that blocks exact command matches
-func CommandsBlocker(bannedCommands []string) BlockFunc {
-	bannedSet := make(map[string]bool)
-	for _, cmd := range bannedCommands {
-		bannedSet[cmd] = true
+func CommandsBlocker(cmds []string) BlockFunc {
+	bannedSet := make(map[string]struct{})
+	for _, cmd := range cmds {
+		bannedSet[cmd] = struct{}{}
 	}
 
 	return func(args []string) bool {
 		if len(args) == 0 {
 			return false
 		}
-		return bannedSet[args[0]]
+		_, ok := bannedSet[args[0]]
+		return ok
 	}
 }
 
-// ArgumentsBlocker creates a BlockFunc that blocks specific subcommands
-func ArgumentsBlocker(blockedSubCommands [][]string) BlockFunc {
-	return func(args []string) bool {
-		for _, blocked := range blockedSubCommands {
-			if len(args) >= len(blocked) {
-				match := true
-				for i, part := range blocked {
-					if args[i] != part {
-						match = false
-						break
-					}
-				}
-				if match {
-					return true
-				}
-			}
+// ArgumentsBlocker creates a BlockFunc that blocks specific subcommand
+func ArgumentsBlocker(cmd string, args []string, flags []string) BlockFunc {
+	return func(parts []string) bool {
+		if len(parts) == 0 || parts[0] != cmd {
+			return false
 		}
-		return false
+
+		argParts, flagParts := splitArgsFlags(parts[1:])
+		if len(argParts) < len(args) || len(flagParts) < len(flags) {
+			return false
+		}
+
+		argsMatch := slices.Equal(argParts[:len(args)], args)
+		flagsMatch := slice.IsSubset(flags, flagParts)
+
+		return argsMatch && flagsMatch
 	}
 }
 
-func (s *Shell) blockHandler() func(next interp.ExecHandlerFunc) interp.ExecHandlerFunc {
-	return func(next interp.ExecHandlerFunc) interp.ExecHandlerFunc {
-		return func(ctx context.Context, args []string) error {
-			if len(args) == 0 {
-				return next(ctx, args)
+func splitArgsFlags(parts []string) (args []string, flags []string) {
+	args = make([]string, 0, len(parts))
+	flags = make([]string, 0, len(parts))
+	for _, part := range parts {
+		if strings.HasPrefix(part, "-") {
+			// Extract flag name before '=' if present
+			flag := part
+			if before, _, ok := strings.Cut(part, "="); ok {
+				flag = before
 			}
-
-			for _, blockFunc := range s.blockFuncs {
-				if blockFunc(args) {
-					return fmt.Errorf("command is not allowed for security reasons: %s", strings.Join(args, " "))
-				}
-			}
-
-			return next(ctx, args)
+			flags = append(flags, flag)
+		} else {
+			args = append(args, part)
 		}
 	}
+	return args, flags
 }
 
-// execPOSIX executes commands using POSIX shell emulation (cross-platform)
-func (s *Shell) execPOSIX(ctx context.Context, command string) (string, string, error) {
+// newInterp creates a new interpreter with the current shell state. A nil
+// stdin is equivalent to an empty input stream.
+func (s *Shell) newInterp(stdin io.Reader, stdout, stderr io.Writer) (*interp.Runner, error) {
+	return newRunner(s.cwd, s.env, stdin, stdout, stderr, s.blockFuncs)
+}
+
+// updateShellFromRunner updates the shell from the interpreter after execution.
+func (s *Shell) updateShellFromRunner(runner *interp.Runner) {
+	s.cwd = runner.Dir
+	s.env = s.env[:0]
+	for name, vr := range runner.Vars {
+		if vr.Exported {
+			s.env = append(s.env, name+"="+vr.Str)
+		}
+	}
+}
+
+// execCommon is the shared implementation for executing commands
+func (s *Shell) execCommon(ctx context.Context, command string, stdout, stderr io.Writer) (err error) {
+	var runner *interp.Runner
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("command execution panic: %v", r)
+		}
+		if runner != nil {
+			s.updateShellFromRunner(runner)
+		}
+		s.logger.InfoPersist("command finished", "command", command, "err", err)
+	}()
+
 	line, err := syntax.NewParser().Parse(strings.NewReader(command), "")
 	if err != nil {
-		return "", "", fmt.Errorf("could not parse command: %w", err)
+		return fmt.Errorf("could not parse command: %w", err)
 	}
 
-	var stdout, stderr bytes.Buffer
-	runner, err := interp.New(
-		interp.StdIO(nil, &stdout, &stderr),
-		interp.Interactive(false),
-		interp.Env(expand.ListEnviron(s.env...)),
-		interp.Dir(s.cwd),
-		interp.ExecHandlers(s.blockHandler(), s.coreUtilsHandler()),
-	)
+	runner, err = s.newInterp(nil, stdout, stderr)
 	if err != nil {
-		return "", "", fmt.Errorf("could not run command: %w", err)
+		return fmt.Errorf("could not run command: %w", err)
 	}
 
 	err = runner.Run(ctx, line)
-	s.cwd = runner.Dir
-	s.env = []string{}
-	for name, vr := range runner.Vars {
-		s.env = append(s.env, fmt.Sprintf("%s=%s", name, vr.Str))
-	}
-	s.logger.InfoPersist("POSIX command finished", "command", command, "err", err)
+	return err
+}
+
+// exec executes commands using a cross-platform shell interpreter.
+func (s *Shell) exec(ctx context.Context, command string) (string, string, error) {
+	var stdout, stderr bytes.Buffer
+	err := s.execCommon(ctx, command, &stdout, &stderr)
 	return stdout.String(), stderr.String(), err
+}
+
+// execStream executes commands using POSIX shell emulation with streaming output
+func (s *Shell) execStream(ctx context.Context, command string, stdout, stderr io.Writer) error {
+	return s.execCommon(ctx, command, stdout, stderr)
 }
 
 // IsInterrupt checks if an error is due to interruption
@@ -248,8 +305,7 @@ func ExitCode(err error) int {
 	if err == nil {
 		return 0
 	}
-	var exitErr interp.ExitStatus
-	if errors.As(err, &exitErr) {
+	if exitErr, ok := errors.AsType[interp.ExitStatus](err); ok {
 		return int(exitErr)
 	}
 	return 1

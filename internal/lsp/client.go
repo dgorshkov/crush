@@ -1,274 +1,315 @@
 package lsp
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log/slog"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"strings"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/charmbracelet/crush/internal/config"
-	"github.com/charmbracelet/crush/internal/log"
-	"github.com/charmbracelet/crush/internal/lsp/protocol"
+	"github.com/charmbracelet/crush/internal/csync"
+	"github.com/charmbracelet/crush/internal/fsext"
+	"github.com/charmbracelet/crush/internal/home"
+	powernap "github.com/charmbracelet/x/powernap/pkg/lsp"
+	"github.com/charmbracelet/x/powernap/pkg/lsp/protocol"
+	"github.com/charmbracelet/x/powernap/pkg/transport"
 )
 
+// DiagnosticCounts holds the count of diagnostics by severity.
+type DiagnosticCounts struct {
+	Error       int
+	Warning     int
+	Information int
+	Hint        int
+}
+
 type Client struct {
-	Cmd    *exec.Cmd
-	stdin  io.WriteCloser
-	stdout *bufio.Reader
-	stderr io.ReadCloser
+	client *powernap.Client
+	name   string
+	debug  bool
 
-	// Request ID counter
-	nextID atomic.Int32
+	// Working directory this LSP is scoped to.
+	cwd string
 
-	// Response handlers
-	handlers   map[int32]chan *Message
-	handlersMu sync.RWMutex
+	// File types this LSP server handles (e.g., .go, .rs, .py)
+	fileTypes []string
 
-	// Server request handlers
-	serverRequestHandlers map[string]ServerRequestHandler
-	serverHandlersMu      sync.RWMutex
+	// Configuration for this LSP client
+	config config.LSPConfig
 
-	// Notification handlers
-	notificationHandlers map[string]NotificationHandler
-	notificationMu       sync.RWMutex
+	// Long-lived context for the client's lifetime, independent of any
+	// request-scoped context. Used for restart and other operations that
+	// must survive beyond the initial tool call that created the client.
+	ctx       context.Context
+	cancelCtx context.CancelFunc
+	resolver  config.VariableResolver
+
+	// Diagnostic change callback
+	onDiagnosticsChanged func(name string, count int)
 
 	// Diagnostic cache
-	diagnostics   map[protocol.DocumentURI][]protocol.Diagnostic
-	diagnosticsMu sync.RWMutex
+	diagnostics *csync.VersionedMap[protocol.DocumentURI, []protocol.Diagnostic]
+
+	// Cached diagnostic counts to avoid map copy on every UI render.
+	diagCountsCache   DiagnosticCounts
+	diagCountsVersion uint64
+	diagCountsMu      sync.Mutex
 
 	// Files are currently opened by the LSP
-	openFiles   map[string]*OpenFileInfo
-	openFilesMu sync.RWMutex
+	openFiles *csync.Map[string, *OpenFileInfo]
 
 	// Server state
 	serverState atomic.Value
 }
 
-func NewClient(ctx context.Context, command string, args ...string) (*Client, error) {
-	cmd := exec.CommandContext(ctx, command, args...)
-	// Copy env
-	cmd.Env = os.Environ()
-
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		return nil, fmt.Errorf("failed to create stdin pipe: %w", err)
-	}
-
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return nil, fmt.Errorf("failed to create stdout pipe: %w", err)
-	}
-
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		return nil, fmt.Errorf("failed to create stderr pipe: %w", err)
-	}
-
+// New creates a new LSP client using the powernap implementation.
+func New(
+	name string,
+	cfg config.LSPConfig,
+	resolver config.VariableResolver,
+	cwd string,
+	debug bool,
+) (*Client, error) {
+	// Use a long-lived context independent of the caller's request context.
+	// The caller's context may be canceled when the tool call completes,
+	// but the LSP client must survive across multiple requests and restarts.
+	clientCtx, cancelCtx := context.WithCancel(context.Background())
 	client := &Client{
-		Cmd:                   cmd,
-		stdin:                 stdin,
-		stdout:                bufio.NewReader(stdout),
-		stderr:                stderr,
-		handlers:              make(map[int32]chan *Message),
-		notificationHandlers:  make(map[string]NotificationHandler),
-		serverRequestHandlers: make(map[string]ServerRequestHandler),
-		diagnostics:           make(map[protocol.DocumentURI][]protocol.Diagnostic),
-		openFiles:             make(map[string]*OpenFileInfo),
+		name:        name,
+		fileTypes:   cfg.FileTypes,
+		diagnostics: csync.NewVersionedMap[protocol.DocumentURI, []protocol.Diagnostic](),
+		openFiles:   csync.NewMap[string, *OpenFileInfo](),
+		config:      cfg,
+		ctx:         clientCtx,
+		cancelCtx:   cancelCtx,
+		debug:       debug,
+		resolver:    resolver,
+		cwd:         cwd,
 	}
+	client.serverState.Store(StateStopped)
 
-	// Initialize server state
-	client.serverState.Store(StateStarting)
-
-	// Start the LSP server process
-	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("failed to start LSP server: %w", err)
+	if err := client.createPowernapClient(); err != nil {
+		return nil, err
 	}
-
-	// Handle stderr in a separate goroutine
-	go func() {
-		scanner := bufio.NewScanner(stderr)
-		for scanner.Scan() {
-			slog.Error("LSP Server", "err", scanner.Text())
-		}
-		if err := scanner.Err(); err != nil {
-			slog.Error("Error reading", "err", err)
-		}
-	}()
-
-	// Start message handling loop
-	go func() {
-		defer log.RecoverPanic("LSP-message-handler", func() {
-			slog.Error("LSP message handler crashed, LSP functionality may be impaired")
-		})
-		client.handleMessages()
-	}()
 
 	return client, nil
 }
 
-func (c *Client) RegisterNotificationHandler(method string, handler NotificationHandler) {
-	c.notificationMu.Lock()
-	defer c.notificationMu.Unlock()
-	c.notificationHandlers[method] = handler
+// Initialize initializes the LSP client and returns the server capabilities.
+func (c *Client) Initialize(ctx context.Context, workspaceDir string) (*protocol.InitializeResult, error) {
+	// Register handlers for requests the server may send during the
+	// initialize handshake itself (e.g. typescript-language-server issuing
+	// window/workDoneProgress/create while loading the project, before
+	// initialize has returned). Registering after client.Initialize() is too
+	// late for those — the server treats an unhandled response as fatal.
+	c.registerHandlers()
+
+	if err := c.client.Initialize(ctx, false); err != nil {
+		return nil, fmt.Errorf("failed to initialize the lsp client: %w", err)
+	}
+
+	// Convert powernap capabilities to protocol capabilities
+	caps := c.client.GetCapabilities()
+	protocolCaps := protocol.ServerCapabilities{
+		TextDocumentSync: caps.TextDocumentSync,
+		CompletionProvider: func() *protocol.CompletionOptions {
+			if caps.CompletionProvider != nil {
+				return &protocol.CompletionOptions{
+					TriggerCharacters:   caps.CompletionProvider.TriggerCharacters,
+					AllCommitCharacters: caps.CompletionProvider.AllCommitCharacters,
+					ResolveProvider:     caps.CompletionProvider.ResolveProvider,
+				}
+			}
+			return nil
+		}(),
+	}
+
+	result := &protocol.InitializeResult{
+		Capabilities: protocolCaps,
+	}
+
+	return result, nil
 }
 
-func (c *Client) RegisterServerRequestHandler(method string, handler ServerRequestHandler) {
-	c.serverHandlersMu.Lock()
-	defer c.serverHandlersMu.Unlock()
-	c.serverRequestHandlers[method] = handler
+// closeTimeout is the maximum time to wait for a graceful LSP shutdown.
+const closeTimeout = 5 * time.Second
+
+// Kill kills the client without doing anything else.
+func (c *Client) Kill() { c.client.Kill() }
+
+// Shutdown permanently cancels the client's long-lived context and kills the
+// underlying process. Unlike Restart, this is terminal: the client cannot be
+// reused after Shutdown.
+func (c *Client) Shutdown() {
+	c.cancelCtx()
+	c.client.Kill()
 }
 
-func (c *Client) InitializeLSPClient(ctx context.Context, workspaceDir string) (*protocol.InitializeResult, error) {
-	initParams := &protocol.InitializeParams{
-		WorkspaceFoldersInitializeParams: protocol.WorkspaceFoldersInitializeParams{
-			WorkspaceFolders: []protocol.WorkspaceFolder{
-				{
-					URI:  protocol.URI(protocol.URIFromPath(workspaceDir)),
-					Name: workspaceDir,
-				},
-			},
-		},
-
-		XInitializeParams: protocol.XInitializeParams{
-			ProcessID: int32(os.Getpid()),
-			ClientInfo: &protocol.ClientInfo{
-				Name:    "mcp-language-server",
-				Version: "0.1.0",
-			},
-			RootPath: workspaceDir,
-			RootURI:  protocol.URIFromPath(workspaceDir),
-			Capabilities: protocol.ClientCapabilities{
-				Workspace: protocol.WorkspaceClientCapabilities{
-					Configuration: true,
-					DidChangeConfiguration: protocol.DidChangeConfigurationClientCapabilities{
-						DynamicRegistration: true,
-					},
-					DidChangeWatchedFiles: protocol.DidChangeWatchedFilesClientCapabilities{
-						DynamicRegistration:    true,
-						RelativePatternSupport: true,
-					},
-				},
-				TextDocument: protocol.TextDocumentClientCapabilities{
-					Synchronization: &protocol.TextDocumentSyncClientCapabilities{
-						DynamicRegistration: true,
-						DidSave:             true,
-					},
-					Completion: protocol.CompletionClientCapabilities{
-						CompletionItem: protocol.ClientCompletionItemOptions{},
-					},
-					CodeLens: &protocol.CodeLensClientCapabilities{
-						DynamicRegistration: true,
-					},
-					DocumentSymbol: protocol.DocumentSymbolClientCapabilities{},
-					CodeAction: protocol.CodeActionClientCapabilities{
-						CodeActionLiteralSupport: protocol.ClientCodeActionLiteralOptions{
-							CodeActionKind: protocol.ClientCodeActionKindOptions{
-								ValueSet: []protocol.CodeActionKind{},
-							},
-						},
-					},
-					PublishDiagnostics: protocol.PublishDiagnosticsClientCapabilities{
-						VersionSupport: true,
-					},
-					SemanticTokens: protocol.SemanticTokensClientCapabilities{
-						Requests: protocol.ClientSemanticTokensRequestOptions{
-							Range: &protocol.Or_ClientSemanticTokensRequestOptions_range{},
-							Full:  &protocol.Or_ClientSemanticTokensRequestOptions_full{},
-						},
-						TokenTypes:     []string{},
-						TokenModifiers: []string{},
-						Formats:        []protocol.TokenFormat{},
-					},
-				},
-				Window: protocol.WindowClientCapabilities{},
-			},
-			InitializationOptions: map[string]any{
-				"codelenses": map[string]bool{
-					"generate":           true,
-					"regenerate_cgo":     true,
-					"test":               true,
-					"tidy":               true,
-					"upgrade_dependency": true,
-					"vendor":             true,
-					"vulncheck":          false,
-				},
-			},
-		},
-	}
-
-	var result protocol.InitializeResult
-	if err := c.Call(ctx, "initialize", initParams, &result); err != nil {
-		return nil, fmt.Errorf("initialize failed: %w", err)
-	}
-
-	if err := c.Notify(ctx, "initialized", struct{}{}); err != nil {
-		return nil, fmt.Errorf("initialized notification failed: %w", err)
-	}
-
-	// Register handlers
-	c.RegisterServerRequestHandler("workspace/applyEdit", HandleApplyEdit)
-	c.RegisterServerRequestHandler("workspace/configuration", HandleWorkspaceConfiguration)
-	c.RegisterServerRequestHandler("client/registerCapability", HandleRegisterCapability)
-	c.RegisterNotificationHandler("window/showMessage", HandleServerMessage)
-	c.RegisterNotificationHandler("textDocument/publishDiagnostics",
-		func(params json.RawMessage) { HandleDiagnostics(c, params) })
-
-	// Notify the LSP server
-	err := c.Initialized(ctx, protocol.InitializedParams{})
-	if err != nil {
-		return nil, fmt.Errorf("initialization failed: %w", err)
-	}
-
-	return &result, nil
+// GetOffsetEncoding returns the negotiated offset encoding for this client.
+func (c *Client) GetOffsetEncoding() powernap.OffsetEncoding {
+	return c.client.GetOffsetEncoding()
 }
 
-func (c *Client) Close() error {
-	// Try to close all open files first
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	// Attempt to close files but continue shutdown regardless
+// Close closes all open files in the client, then shuts down gracefully.
+// If shutdown takes longer than closeTimeout, it falls back to Kill().
+func (c *Client) Close(ctx context.Context) error {
 	c.CloseAllFiles(ctx)
 
-	// Close stdin to signal the server
-	if err := c.stdin.Close(); err != nil {
-		return fmt.Errorf("failed to close stdin: %w", err)
-	}
+	// Use a timeout to prevent hanging on unresponsive LSP servers.
+	// jsonrpc2's send lock doesn't respect context cancellation, so we
+	// need to fall back to Kill() which closes the underlying connection.
+	closeCtx, cancel := context.WithTimeout(ctx, closeTimeout)
+	defer cancel()
 
-	// Use a channel to handle the Wait with timeout
 	done := make(chan error, 1)
 	go func() {
-		done <- c.Cmd.Wait()
+		if err := c.client.Shutdown(closeCtx); err != nil {
+			slog.Warn("Failed to shutdown LSP client", "error", err)
+		}
+		done <- c.client.Exit()
 	}()
 
-	// Wait for process to exit with timeout
 	select {
 	case err := <-done:
 		return err
-	case <-time.After(2 * time.Second):
-		// If we timeout, try to kill the process
-		if err := c.Cmd.Process.Kill(); err != nil {
-			return fmt.Errorf("failed to kill process: %w", err)
-		}
-		return fmt.Errorf("process killed after timeout")
+	case <-closeCtx.Done():
+		c.client.Kill()
+		return closeCtx.Err()
 	}
 }
 
+// createPowernapClient creates a new powernap client with the current configuration.
+func (c *Client) createPowernapClient() error {
+	rootURI := string(protocol.URIFromPath(c.cwd))
+
+	command, err := c.resolver.ResolveValue(c.config.Command)
+	if err != nil {
+		return fmt.Errorf("invalid lsp command: %w", err)
+	}
+
+	args, err := c.config.ResolvedArgs(c.resolver)
+	if err != nil {
+		return fmt.Errorf("invalid lsp args: %w", err)
+	}
+
+	envs, err := c.config.ResolvedEnv(c.resolver)
+	if err != nil {
+		return fmt.Errorf("invalid lsp env: %w", err)
+	}
+
+	clientConfig := powernap.ClientConfig{
+		Command:     home.Long(command),
+		Args:        args,
+		RootURI:     rootURI,
+		Environment: envs,
+		Settings:    c.config.Options,
+		InitOptions: c.config.InitOptions,
+		WorkspaceFolders: []protocol.WorkspaceFolder{
+			{
+				URI:  rootURI,
+				Name: filepath.Base(c.cwd),
+			},
+		},
+	}
+
+	powernapClient, err := powernap.NewClient(clientConfig)
+	if err != nil {
+		return fmt.Errorf("failed to create lsp client: %w", err)
+	}
+
+	c.client = powernapClient
+	return nil
+}
+
+// registerHandlers registers the standard LSP notification and request handlers.
+func (c *Client) registerHandlers() {
+	c.RegisterServerRequestHandler("workspace/applyEdit", HandleApplyEdit(c.client.GetOffsetEncoding()))
+	c.RegisterServerRequestHandler("workspace/configuration", HandleWorkspaceConfiguration)
+	c.RegisterServerRequestHandler("client/registerCapability", HandleRegisterCapability)
+	c.RegisterServerRequestHandler("window/workDoneProgress/create", HandleWorkDoneProgressCreate)
+	c.RegisterNotificationHandler("window/showMessage", func(ctx context.Context, method string, params json.RawMessage) {
+		if c.debug {
+			HandleServerMessage(ctx, method, params)
+		}
+	})
+	c.RegisterNotificationHandler("textDocument/publishDiagnostics", func(_ context.Context, _ string, params json.RawMessage) {
+		HandleDiagnostics(c, params)
+	})
+}
+
+// Restart closes the current LSP client and creates a new one with the same configuration.
+func (c *Client) Restart() error {
+	var openFiles []string
+	for uri := range c.openFiles.Seq2() {
+		openFiles = append(openFiles, string(uri))
+	}
+
+	// Cancel the old long-lived context and create a fresh one so that
+	// reinitialization is not affected by any prior cancellation.
+	c.cancelCtx()
+	c.ctx, c.cancelCtx = context.WithCancel(context.Background())
+
+	closeCtx, cancel := context.WithTimeout(c.ctx, 10*time.Second)
+	defer cancel()
+
+	if err := c.Close(closeCtx); err != nil {
+		slog.Warn("Error closing client during restart", "name", c.name, "error", err)
+	}
+
+	c.SetServerState(StateStopped)
+
+	c.diagCountsCache = DiagnosticCounts{}
+	c.diagCountsVersion = 0
+
+	if err := c.createPowernapClient(); err != nil {
+		return err
+	}
+
+	initCtx, cancel := context.WithTimeout(c.ctx, 30*time.Second)
+	defer cancel()
+
+	c.SetServerState(StateStarting)
+
+	// Register handlers before Initialize so servers that send
+	// requests during the handshake (e.g. window/workDoneProgress/create)
+	// don't crash on an unhandled response.
+	c.registerHandlers()
+
+	if err := c.client.Initialize(initCtx, false); err != nil {
+		c.SetServerState(StateError)
+		return fmt.Errorf("failed to initialize lsp client: %w", err)
+	}
+
+	if err := c.WaitForServerReady(initCtx); err != nil {
+		slog.Error("Server failed to become ready after restart", "name", c.name, "error", err)
+		c.SetServerState(StateError)
+		return err
+	}
+
+	for _, uri := range openFiles {
+		if err := c.OpenFile(initCtx, uri); err != nil {
+			slog.Warn("Failed to reopen file after restart", "file", uri, "error", err)
+		}
+	}
+	return nil
+}
+
+// ServerState represents the state of an LSP server
 type ServerState int
 
 const (
-	StateStarting ServerState = iota
+	StateUnstarted ServerState = iota
+	StateStarting
 	StateReady
 	StateError
+	StateStopped
+	StateDisabled
 )
 
 // GetServerState returns the current state of the LSP server
@@ -284,36 +325,35 @@ func (c *Client) SetServerState(state ServerState) {
 	c.serverState.Store(state)
 }
 
-// WaitForServerReady waits for the server to be ready by polling the server
-// with a simple request until it responds successfully or times out
-func (c *Client) WaitForServerReady(ctx context.Context) error {
-	cfg := config.Get()
+// GetName returns the name of the LSP client
+func (c *Client) GetName() string {
+	return c.name
+}
 
+// FileTypes returns the file types this LSP client handles
+func (c *Client) FileTypes() []string {
+	return slices.Clone(c.fileTypes)
+}
+
+// SetDiagnosticsCallback sets the callback function for diagnostic changes
+func (c *Client) SetDiagnosticsCallback(callback func(name string, count int)) {
+	c.onDiagnosticsChanged = callback
+}
+
+// WaitForServerReady waits for the server to be ready
+func (c *Client) WaitForServerReady(ctx context.Context) error {
 	// Set initial state
 	c.SetServerState(StateStarting)
-
-	// Create a context with timeout
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
 
 	// Try to ping the server with a simple request
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 
-	if cfg.Options.DebugLSP {
+	if c.debug {
 		slog.Debug("Waiting for LSP server to be ready...")
 	}
 
-	// Determine server type for specialized initialization
-	serverType := c.detectServerType()
-
-	// For TypeScript-like servers, we need to open some key files first
-	if serverType == ServerTypeTypeScript {
-		if cfg.Options.DebugLSP {
-			slog.Debug("TypeScript-like server detected, opening key configuration files")
-		}
-		c.openKeyConfigFiles(ctx)
-	}
+	c.openKeyConfigFiles(ctx)
 
 	for {
 		select {
@@ -321,285 +361,54 @@ func (c *Client) WaitForServerReady(ctx context.Context) error {
 			c.SetServerState(StateError)
 			return fmt.Errorf("timeout waiting for LSP server to be ready")
 		case <-ticker.C:
-			// Try a ping method appropriate for this server type
-			err := c.pingServerByType(ctx, serverType)
-			if err == nil {
-				// Server responded successfully
-				c.SetServerState(StateReady)
-				if cfg.Options.DebugLSP {
-					slog.Debug("LSP server is ready")
+			// Check if client is running
+			if !c.client.IsRunning() {
+				if c.debug {
+					slog.Debug("LSP server not ready yet", "server", c.name)
 				}
-				return nil
-			} else {
-				slog.Debug("LSP server not ready yet", "error", err, "serverType", serverType)
+				continue
 			}
 
-			if cfg.Options.DebugLSP {
-				slog.Debug("LSP server not ready yet", "error", err, "serverType", serverType)
-			}
-		}
-	}
-}
-
-// ServerType represents the type of LSP server
-type ServerType int
-
-const (
-	ServerTypeUnknown ServerType = iota
-	ServerTypeGo
-	ServerTypeTypeScript
-	ServerTypeRust
-	ServerTypePython
-	ServerTypeGeneric
-)
-
-// detectServerType tries to determine what type of LSP server we're dealing with
-func (c *Client) detectServerType() ServerType {
-	if c.Cmd == nil {
-		return ServerTypeUnknown
-	}
-
-	cmdPath := strings.ToLower(c.Cmd.Path)
-
-	switch {
-	case strings.Contains(cmdPath, "gopls"):
-		return ServerTypeGo
-	case strings.Contains(cmdPath, "typescript") || strings.Contains(cmdPath, "vtsls") || strings.Contains(cmdPath, "tsserver"):
-		return ServerTypeTypeScript
-	case strings.Contains(cmdPath, "rust-analyzer"):
-		return ServerTypeRust
-	case strings.Contains(cmdPath, "pyright") || strings.Contains(cmdPath, "pylsp") || strings.Contains(cmdPath, "python"):
-		return ServerTypePython
-	default:
-		return ServerTypeGeneric
-	}
-}
-
-// openKeyConfigFiles opens important configuration files that help initialize the server
-func (c *Client) openKeyConfigFiles(ctx context.Context) {
-	workDir := config.Get().WorkingDir()
-	serverType := c.detectServerType()
-
-	var filesToOpen []string
-
-	switch serverType {
-	case ServerTypeTypeScript:
-		// TypeScript servers need these config files to properly initialize
-		filesToOpen = []string{
-			filepath.Join(workDir, "tsconfig.json"),
-			filepath.Join(workDir, "package.json"),
-			filepath.Join(workDir, "jsconfig.json"),
-		}
-
-		// Also find and open a few TypeScript files to help the server initialize
-		c.openTypeScriptFiles(ctx, workDir)
-	case ServerTypeGo:
-		filesToOpen = []string{
-			filepath.Join(workDir, "go.mod"),
-			filepath.Join(workDir, "go.sum"),
-		}
-	case ServerTypeRust:
-		filesToOpen = []string{
-			filepath.Join(workDir, "Cargo.toml"),
-			filepath.Join(workDir, "Cargo.lock"),
-		}
-	}
-
-	// Try to open each file, ignoring errors if they don't exist
-	for _, file := range filesToOpen {
-		if _, err := os.Stat(file); err == nil {
-			// File exists, try to open it
-			if err := c.OpenFile(ctx, file); err != nil {
-				slog.Debug("Failed to open key config file", "file", file, "error", err)
-			} else {
-				slog.Debug("Opened key config file for initialization", "file", file)
-			}
-		}
-	}
-}
-
-// pingServerByType sends a ping request appropriate for the server type
-func (c *Client) pingServerByType(ctx context.Context, serverType ServerType) error {
-	switch serverType {
-	case ServerTypeTypeScript:
-		// For TypeScript, try a document symbol request on an open file
-		return c.pingTypeScriptServer(ctx)
-	case ServerTypeGo:
-		// For Go, workspace/symbol works well
-		return c.pingWithWorkspaceSymbol(ctx)
-	case ServerTypeRust:
-		// For Rust, workspace/symbol works well
-		return c.pingWithWorkspaceSymbol(ctx)
-	default:
-		// Default ping method
-		return c.pingWithWorkspaceSymbol(ctx)
-	}
-}
-
-// pingTypeScriptServer tries to ping a TypeScript server with appropriate methods
-func (c *Client) pingTypeScriptServer(ctx context.Context) error {
-	// First try workspace/symbol which works for many servers
-	if err := c.pingWithWorkspaceSymbol(ctx); err == nil {
-		return nil
-	}
-
-	// If that fails, try to find an open file and request document symbols
-	c.openFilesMu.RLock()
-	defer c.openFilesMu.RUnlock()
-
-	// If we have any open files, try to get document symbols for one
-	for uri := range c.openFiles {
-		filePath, err := protocol.DocumentURI(uri).Path()
-		if err != nil {
-			slog.Error("Failed to convert URI to path for TypeScript symbol collection", "uri", uri, "error", err)
-			continue
-		}
-
-		if strings.HasSuffix(filePath, ".ts") || strings.HasSuffix(filePath, ".js") ||
-			strings.HasSuffix(filePath, ".tsx") || strings.HasSuffix(filePath, ".jsx") {
-			var symbols []protocol.DocumentSymbol
-			err := c.Call(ctx, "textDocument/documentSymbol", protocol.DocumentSymbolParams{
-				TextDocument: protocol.TextDocumentIdentifier{
-					URI: protocol.DocumentURI(uri),
-				},
-			}, &symbols)
-			if err == nil {
-				return nil
-			}
-		}
-	}
-
-	// If we have no open TypeScript files, try to find and open one
-	workDir := config.Get().WorkingDir()
-	err := filepath.WalkDir(workDir, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-
-		// Skip directories and non-TypeScript files
-		if d.IsDir() {
-			return nil
-		}
-
-		ext := filepath.Ext(path)
-		if ext == ".ts" || ext == ".js" || ext == ".tsx" || ext == ".jsx" {
-			// Found a TypeScript file, try to open it
-			if err := c.OpenFile(ctx, path); err == nil {
-				// Successfully opened, stop walking
-				return filepath.SkipAll
-			}
-		}
-
-		return nil
-	})
-	if err != nil {
-		slog.Debug("Error walking directory for TypeScript files", "error", err)
-	}
-
-	// Final fallback - just try a generic capability
-	return c.pingWithServerCapabilities(ctx)
-}
-
-// openTypeScriptFiles finds and opens TypeScript files to help initialize the server
-func (c *Client) openTypeScriptFiles(ctx context.Context, workDir string) {
-	cfg := config.Get()
-	filesOpened := 0
-	maxFilesToOpen := 5 // Limit to a reasonable number of files
-
-	// Find and open TypeScript files
-	err := filepath.WalkDir(workDir, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-
-		// Skip directories and non-TypeScript files
-		if d.IsDir() {
-			// Skip common directories to avoid wasting time
-			if shouldSkipDir(path) {
-				return filepath.SkipDir
+			// Server is ready
+			c.SetServerState(StateReady)
+			if c.debug {
+				slog.Debug("LSP server is ready")
 			}
 			return nil
 		}
-
-		// Check if we've opened enough files
-		if filesOpened >= maxFilesToOpen {
-			return filepath.SkipAll
-		}
-
-		// Check file extension
-		ext := filepath.Ext(path)
-		if ext == ".ts" || ext == ".tsx" || ext == ".js" || ext == ".jsx" {
-			// Try to open the file
-			if err := c.OpenFile(ctx, path); err == nil {
-				filesOpened++
-				if cfg.Options.DebugLSP {
-					slog.Debug("Opened TypeScript file for initialization", "file", path)
-				}
-			}
-		}
-
-		return nil
-	})
-
-	if err != nil && cfg.Options.DebugLSP {
-		slog.Debug("Error walking directory for TypeScript files", "error", err)
-	}
-
-	if cfg.Options.DebugLSP {
-		slog.Debug("Opened TypeScript files for initialization", "count", filesOpened)
 	}
 }
 
-// shouldSkipDir returns true if the directory should be skipped during file search
-func shouldSkipDir(path string) bool {
-	dirName := filepath.Base(path)
-
-	// Skip hidden directories
-	if strings.HasPrefix(dirName, ".") {
-		return true
-	}
-
-	// Skip common directories that won't contain relevant source files
-	skipDirs := map[string]bool{
-		"node_modules": true,
-		"dist":         true,
-		"build":        true,
-		"coverage":     true,
-		"vendor":       true,
-		"target":       true,
-	}
-
-	return skipDirs[dirName]
-}
-
-// pingWithWorkspaceSymbol tries a workspace/symbol request
-func (c *Client) pingWithWorkspaceSymbol(ctx context.Context) error {
-	var result []protocol.SymbolInformation
-	return c.Call(ctx, "workspace/symbol", protocol.WorkspaceSymbolParams{
-		Query: "",
-	}, &result)
-}
-
-// pingWithServerCapabilities tries to get server capabilities
-func (c *Client) pingWithServerCapabilities(ctx context.Context) error {
-	// This is a very lightweight request that should work for most servers
-	return c.Notify(ctx, "$/cancelRequest", struct{ ID int }{ID: -1})
-}
-
+// OpenFileInfo contains information about an open file
 type OpenFileInfo struct {
 	Version int32
 	URI     protocol.DocumentURI
 }
 
+// HandlesFile checks if this LSP client handles the given file based on its
+// extension and whether it's within the working directory.
+func (c *Client) HandlesFile(path string) bool {
+	if c == nil {
+		return false
+	}
+	if !fsext.HasPrefix(path, c.cwd) {
+		slog.Debug("File outside workspace", "name", c.name, "file", path, "workDir", c.cwd)
+		return false
+	}
+	return handlesFiletype(c.name, c.fileTypes, path)
+}
+
+// OpenFile opens a file in the LSP server.
 func (c *Client) OpenFile(ctx context.Context, filepath string) error {
+	if !c.HandlesFile(filepath) {
+		return nil
+	}
+
 	uri := string(protocol.URIFromPath(filepath))
 
-	c.openFilesMu.Lock()
-	if _, exists := c.openFiles[uri]; exists {
-		c.openFilesMu.Unlock()
+	if _, exists := c.openFiles.Get(uri); exists {
 		return nil // Already open
 	}
-	c.openFilesMu.Unlock()
 
 	// Skip files that do not exist or cannot be read
 	content, err := os.ReadFile(filepath)
@@ -607,30 +416,24 @@ func (c *Client) OpenFile(ctx context.Context, filepath string) error {
 		return fmt.Errorf("error reading file: %w", err)
 	}
 
-	params := protocol.DidOpenTextDocumentParams{
-		TextDocument: protocol.TextDocumentItem{
-			URI:        protocol.DocumentURI(uri),
-			LanguageID: DetectLanguageID(uri),
-			Version:    1,
-			Text:       string(content),
-		},
-	}
-
-	if err := c.Notify(ctx, "textDocument/didOpen", params); err != nil {
+	// Notify the server about the opened document
+	if err = c.client.NotifyDidOpenTextDocument(ctx, uri, string(powernap.DetectLanguage(filepath)), 1, string(content)); err != nil {
 		return err
 	}
 
-	c.openFilesMu.Lock()
-	c.openFiles[uri] = &OpenFileInfo{
+	c.openFiles.Set(uri, &OpenFileInfo{
 		Version: 1,
 		URI:     protocol.DocumentURI(uri),
-	}
-	c.openFilesMu.Unlock()
+	})
 
 	return nil
 }
 
+// NotifyChange notifies the server about a file change.
 func (c *Client) NotifyChange(ctx context.Context, filepath string) error {
+	if c == nil {
+		return nil
+	}
 	uri := string(protocol.URIFromPath(filepath))
 
 	content, err := os.ReadFile(filepath)
@@ -638,122 +441,103 @@ func (c *Client) NotifyChange(ctx context.Context, filepath string) error {
 		return fmt.Errorf("error reading file: %w", err)
 	}
 
-	c.openFilesMu.Lock()
-	fileInfo, isOpen := c.openFiles[uri]
+	fileInfo, isOpen := c.openFiles.Get(uri)
 	if !isOpen {
-		c.openFilesMu.Unlock()
 		return fmt.Errorf("cannot notify change for unopened file: %s", filepath)
 	}
 
 	// Increment version
 	fileInfo.Version++
-	version := fileInfo.Version
-	c.openFilesMu.Unlock()
 
-	params := protocol.DidChangeTextDocumentParams{
-		TextDocument: protocol.VersionedTextDocumentIdentifier{
-			TextDocumentIdentifier: protocol.TextDocumentIdentifier{
-				URI: protocol.DocumentURI(uri),
-			},
-			Version: version,
-		},
-		ContentChanges: []protocol.TextDocumentContentChangeEvent{
-			{
-				Value: protocol.TextDocumentContentChangeWholeDocument{
-					Text: string(content),
-				},
+	// Create change event
+	changes := []protocol.TextDocumentContentChangeEvent{
+		{
+			Value: protocol.TextDocumentContentChangeWholeDocument{
+				Text: string(content),
 			},
 		},
 	}
 
-	return c.Notify(ctx, "textDocument/didChange", params)
+	return c.client.NotifyDidChangeTextDocument(ctx, uri, int(fileInfo.Version), changes)
 }
 
-func (c *Client) CloseFile(ctx context.Context, filepath string) error {
-	cfg := config.Get()
-	uri := string(protocol.URIFromPath(filepath))
-
-	c.openFilesMu.Lock()
-	if _, exists := c.openFiles[uri]; !exists {
-		c.openFilesMu.Unlock()
-		return nil // Already closed
-	}
-	c.openFilesMu.Unlock()
-
-	params := protocol.DidCloseTextDocumentParams{
-		TextDocument: protocol.TextDocumentIdentifier{
-			URI: protocol.DocumentURI(uri),
-		},
-	}
-
-	if cfg.Options.DebugLSP {
-		slog.Debug("Closing file", "file", filepath)
-	}
-	if err := c.Notify(ctx, "textDocument/didClose", params); err != nil {
-		return err
-	}
-
-	c.openFilesMu.Lock()
-	delete(c.openFiles, uri)
-	c.openFilesMu.Unlock()
-
-	return nil
-}
-
+// IsFileOpen checks if a file is currently open.
 func (c *Client) IsFileOpen(filepath string) bool {
 	uri := string(protocol.URIFromPath(filepath))
-	c.openFilesMu.RLock()
-	defer c.openFilesMu.RUnlock()
-	_, exists := c.openFiles[uri]
+	_, exists := c.openFiles.Get(uri)
 	return exists
 }
 
-// CloseAllFiles closes all currently open files
+// CloseAllFiles closes all currently open files.
 func (c *Client) CloseAllFiles(ctx context.Context) {
-	cfg := config.Get()
-	c.openFilesMu.Lock()
-	filesToClose := make([]string, 0, len(c.openFiles))
-
-	// First collect all URIs that need to be closed
-	for uri := range c.openFiles {
-		// Convert URI back to file path using proper URI handling
-		filePath, err := protocol.DocumentURI(uri).Path()
-		if err != nil {
-			slog.Error("Failed to convert URI to path for file closing", "uri", uri, "error", err)
+	for uri := range c.openFiles.Seq2() {
+		if c.debug {
+			slog.Debug("Closing file", "file", uri)
+		}
+		if err := c.client.NotifyDidCloseTextDocument(ctx, uri); err != nil {
+			slog.Warn("Error closing file", "uri", uri, "error", err)
 			continue
 		}
-		filesToClose = append(filesToClose, filePath)
+		c.openFiles.Del(uri)
 	}
-	c.openFilesMu.Unlock()
+}
 
-	// Then close them all
-	for _, filePath := range filesToClose {
-		err := c.CloseFile(ctx, filePath)
-		if err != nil && cfg.Options.DebugLSP {
-			slog.Warn("Error closing file", "file", filePath, "error", err)
+// GetFileDiagnostics returns diagnostics for a specific file.
+func (c *Client) GetFileDiagnostics(uri protocol.DocumentURI) []protocol.Diagnostic {
+	diags, _ := c.diagnostics.Get(uri)
+	return diags
+}
+
+// GetDiagnostics returns all diagnostics for all files.
+func (c *Client) GetDiagnostics() map[protocol.DocumentURI][]protocol.Diagnostic {
+	if c == nil {
+		return nil
+	}
+	return c.diagnostics.Copy()
+}
+
+// GetDiagnosticCounts returns cached diagnostic counts by severity.
+// Uses the VersionedMap version to avoid recomputing on every call.
+func (c *Client) GetDiagnosticCounts() DiagnosticCounts {
+	if c == nil {
+		return DiagnosticCounts{}
+	}
+	currentVersion := c.diagnostics.Version()
+
+	c.diagCountsMu.Lock()
+	defer c.diagCountsMu.Unlock()
+
+	if currentVersion == c.diagCountsVersion {
+		return c.diagCountsCache
+	}
+
+	// Recompute counts.
+	counts := DiagnosticCounts{}
+	for _, diags := range c.diagnostics.Seq2() {
+		for _, diag := range diags {
+			switch diag.Severity {
+			case protocol.SeverityError:
+				counts.Error++
+			case protocol.SeverityWarning:
+				counts.Warning++
+			case protocol.SeverityInformation:
+				counts.Information++
+			case protocol.SeverityHint:
+				counts.Hint++
+			}
 		}
 	}
 
-	if cfg.Options.DebugLSP {
-		slog.Debug("Closed all files", "files", filesToClose)
-	}
+	c.diagCountsCache = counts
+	c.diagCountsVersion = currentVersion
+	return counts
 }
 
-func (c *Client) GetFileDiagnostics(uri protocol.DocumentURI) []protocol.Diagnostic {
-	c.diagnosticsMu.RLock()
-	defer c.diagnosticsMu.RUnlock()
-
-	return c.diagnostics[uri]
-}
-
-// GetDiagnostics returns all diagnostics for all files
-func (c *Client) GetDiagnostics() map[protocol.DocumentURI][]protocol.Diagnostic {
-	return c.diagnostics
-}
-
-// OpenFileOnDemand opens a file only if it's not already open
-// This is used for lazy-loading files when they're actually needed
+// OpenFileOnDemand opens a file only if it's not already open.
 func (c *Client) OpenFileOnDemand(ctx context.Context, filepath string) error {
+	if c == nil {
+		return nil
+	}
 	// Check if the file is already open
 	if c.IsFileOpen(filepath) {
 		return nil
@@ -763,32 +547,223 @@ func (c *Client) OpenFileOnDemand(ctx context.Context, filepath string) error {
 	return c.OpenFile(ctx, filepath)
 }
 
-// GetDiagnosticsForFile ensures a file is open and returns its diagnostics
-// This is useful for on-demand diagnostics when using lazy loading
-func (c *Client) GetDiagnosticsForFile(ctx context.Context, filepath string) ([]protocol.Diagnostic, error) {
-	documentURI := protocol.URIFromPath(filepath)
-
-	// Make sure the file is open
-	if !c.IsFileOpen(filepath) {
-		if err := c.OpenFile(ctx, filepath); err != nil {
-			return nil, fmt.Errorf("failed to open file for diagnostics: %w", err)
-		}
-
-		// Give the LSP server a moment to process the file
-		time.Sleep(100 * time.Millisecond)
-	}
-
-	// Get diagnostics
-	c.diagnosticsMu.RLock()
-	diagnostics := c.diagnostics[documentURI]
-	c.diagnosticsMu.RUnlock()
-
-	return diagnostics, nil
+// RegisterNotificationHandler registers a notification handler.
+func (c *Client) RegisterNotificationHandler(method string, handler transport.NotificationHandler) {
+	c.client.RegisterNotificationHandler(method, handler)
 }
 
-// ClearDiagnosticsForURI removes diagnostics for a specific URI from the cache
-func (c *Client) ClearDiagnosticsForURI(uri protocol.DocumentURI) {
-	c.diagnosticsMu.Lock()
-	defer c.diagnosticsMu.Unlock()
-	delete(c.diagnostics, uri)
+// RegisterServerRequestHandler handles server requests.
+func (c *Client) RegisterServerRequestHandler(method string, handler transport.Handler) {
+	c.client.RegisterHandler(method, handler)
+}
+
+// openKeyConfigFiles opens important configuration files that help initialize the server.
+func (c *Client) openKeyConfigFiles(ctx context.Context) {
+	// Try to open each file, ignoring errors if they don't exist
+	for _, file := range c.config.RootMarkers {
+		file = filepath.Join(c.cwd, file)
+		if _, err := os.Stat(file); err == nil {
+			// File exists, try to open it
+			if err := c.OpenFile(ctx, file); err != nil {
+				slog.Error("Failed to open key config file", "file", file, "error", err)
+			} else {
+				slog.Debug("Opened key config file for initialization", "file", file)
+			}
+		}
+	}
+}
+
+// NotifyWorkspaceChange sends a workspace-level file change notification to
+// trigger re-analysis of all files. This is useful when the overall project
+// state may have changed (e.g., after a project-wide refactoring) and
+// diagnostics for files not currently being edited may be stale.
+func (c *Client) NotifyWorkspaceChange(ctx context.Context) error {
+	if c == nil {
+		return nil
+	}
+	return c.client.NotifyDidChangeWatchedFiles(ctx, []protocol.FileEvent{
+		{URI: protocol.DocumentURI(protocol.URIFromPath(c.cwd)), Type: protocol.Changed},
+	})
+}
+
+// RefreshOpenFiles re-notifies the LSP server about all currently open files,
+// which triggers re-analysis and fresh diagnostics for the entire project.
+func (c *Client) RefreshOpenFiles(ctx context.Context) {
+	if c == nil {
+		return
+	}
+	for uri, info := range c.openFiles.Seq2() {
+		path, err := protocol.DocumentURI(uri).Path()
+		if err != nil {
+			slog.Warn("Failed to convert URI to path", "uri", uri, "error", err)
+			continue
+		}
+		content, err := os.ReadFile(path)
+		if err != nil {
+			slog.Warn("Failed to read file for refresh", "path", path, "error", err)
+			continue
+		}
+		info.Version++
+		changes := []protocol.TextDocumentContentChangeEvent{
+			{
+				Value: protocol.TextDocumentContentChangeWholeDocument{
+					Text: string(content),
+				},
+			},
+		}
+		if err := c.client.NotifyDidChangeTextDocument(ctx, uri, int(info.Version), changes); err != nil {
+			slog.Warn("Failed to notify file change", "uri", uri, "error", err)
+		}
+	}
+}
+
+// WaitForDiagnostics waits until diagnostics stop changing for a settling
+// period, indicating the LSP server has finished processing. If no
+// diagnostics change within firstChangeDuration, it returns early since the
+// server likely isn't going to republish.
+func (c *Client) WaitForDiagnostics(ctx context.Context, timeout time.Duration) {
+	if c == nil {
+		return
+	}
+
+	const (
+		firstChangeDuration = 1 * time.Second
+		settleDuration      = 300 * time.Millisecond
+	)
+
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	firstChangeTimer := time.NewTimer(min(timeout, firstChangeDuration))
+	defer firstChangeTimer.Stop()
+	previousVersion := c.diagnostics.Version()
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-deadline.C:
+			return
+		case <-firstChangeTimer.C:
+			// No change arrived quickly — server isn't republishing.
+			return
+		case <-ticker.C:
+			currentVersion := c.diagnostics.Version()
+			if currentVersion != previousVersion {
+				// Diagnostics changed — now wait for them to settle.
+				c.waitForDiagnosticsToSettle(ctx, deadline.C, settleDuration)
+				return
+			}
+		}
+	}
+}
+
+// waitForDiagnosticsToSettle waits until diagnostics version stays the same
+// for settleDuration, indicating the LSP server has finished publishing.
+func (c *Client) waitForDiagnosticsToSettle(ctx context.Context, deadline <-chan time.Time, settleDuration time.Duration) {
+	lastVersion := c.diagnostics.Version()
+	settleTicker := time.NewTicker(50 * time.Millisecond)
+	defer settleTicker.Stop()
+
+	// Track how long the version has been stable.
+	stableStart := time.Now()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-deadline:
+			return
+		case <-settleTicker.C:
+			currentVersion := c.diagnostics.Version()
+			if currentVersion != lastVersion {
+				// New change detected — reset the stable timer.
+				lastVersion = currentVersion
+				stableStart = time.Now()
+			} else if time.Since(stableStart) >= settleDuration {
+				// Diagnostics have been stable for the settle duration.
+				return
+			}
+		}
+	}
+}
+
+// FindReferences finds all references to the symbol at the given position.
+func (c *Client) FindReferences(ctx context.Context, filepath string, line, character int, includeDeclaration bool) ([]protocol.Location, error) {
+	if err := c.OpenFileOnDemand(ctx, filepath); err != nil {
+		return nil, err
+	}
+
+	// Add timeout to prevent hanging on slow LSP servers.
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	// NOTE: line and character should be 0-based.
+	// See: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/#position
+	return c.client.FindReferences(ctx, filepath, line-1, character-1, includeDeclaration)
+}
+
+// Rename renames the symbol at the given position across all files.
+func (c *Client) Rename(ctx context.Context, filepath string, line, character int, newName string) (*protocol.WorkspaceEdit, error) {
+	if err := c.OpenFileOnDemand(ctx, filepath); err != nil {
+		return nil, err
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	return c.client.RequestRename(ctx, filepath, line-1, character-1, newName) //nolint:wrapcheck
+}
+
+// DocumentSymbols returns the document symbols for the given file.
+func (c *Client) DocumentSymbols(ctx context.Context, filepath string) ([]protocol.DocumentSymbolResult, error) {
+	if err := c.OpenFileOnDemand(ctx, filepath); err != nil {
+		return nil, err
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	return c.client.RequestDocumentSymbols(ctx, filepath) //nolint:wrapcheck
+}
+
+// Definition finds the definition of the symbol at the given position.
+func (c *Client) Definition(ctx context.Context, filepath string, line, character int) ([]protocol.Location, error) {
+	if err := c.OpenFileOnDemand(ctx, filepath); err != nil {
+		return nil, err
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	return c.client.RequestDefinition(ctx, filepath, line-1, character-1) //nolint:wrapcheck
+}
+
+// PrepareCallHierarchy prepares a call hierarchy item at the given position.
+func (c *Client) PrepareCallHierarchy(ctx context.Context, filepath string, line, character int) ([]protocol.CallHierarchyItem, error) {
+	if err := c.OpenFileOnDemand(ctx, filepath); err != nil {
+		return nil, err
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	return c.client.PrepareCallHierarchy(ctx, filepath, line-1, character-1) //nolint:wrapcheck
+}
+
+// IncomingCalls returns all callers of the given call hierarchy item.
+func (c *Client) IncomingCalls(ctx context.Context, item protocol.CallHierarchyItem) ([]protocol.CallHierarchyIncomingCall, error) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	return c.client.IncomingCalls(ctx, item) //nolint:wrapcheck
+}
+
+// OutgoingCalls returns all callees of the given call hierarchy item.
+func (c *Client) OutgoingCalls(ctx context.Context, item protocol.CallHierarchyItem) ([]protocol.CallHierarchyOutgoingCall, error) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	return c.client.OutgoingCalls(ctx, item) //nolint:wrapcheck
 }

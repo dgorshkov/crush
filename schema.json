@@ -3,8 +3,59 @@
   "$id": "https://github.com/charmbracelet/crush/internal/config/config",
   "$ref": "#/$defs/Config",
   "$defs": {
+    "Attribution": {
+      "properties": {
+        "trailer_style": {
+          "type": "string",
+          "enum": [
+            "none",
+            "co-authored-by",
+            "assisted-by"
+          ],
+          "description": "Style of attribution trailer to add to commits",
+          "default": "assisted-by"
+        },
+        "co_authored_by": {
+          "type": "boolean",
+          "description": "Deprecated: use trailer_style instead",
+          "deprecated": true
+        },
+        "generated_with": {
+          "type": "boolean",
+          "description": "Add Generated with Crush line to commit messages and issues and PRs",
+          "default": true
+        }
+      },
+      "additionalProperties": false,
+      "type": "object"
+    },
+    "Completions": {
+      "properties": {
+        "max_depth": {
+          "type": "integer",
+          "description": "Maximum depth for the ls tool",
+          "default": 0,
+          "examples": [
+            10
+          ]
+        },
+        "max_items": {
+          "type": "integer",
+          "description": "Maximum number of items to return for the ls tool",
+          "default": 1000,
+          "examples": [
+            100
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "type": "object"
+    },
     "Config": {
       "properties": {
+        "$schema": {
+          "type": "string"
+        },
         "models": {
           "additionalProperties": {
             "$ref": "#/$defs/SelectedModel"
@@ -34,14 +85,61 @@
         "permissions": {
           "$ref": "#/$defs/Permissions",
           "description": "Permission settings for tool usage"
+        },
+        "tools": {
+          "$ref": "#/$defs/Tools",
+          "description": "Tool configurations"
+        },
+        "hooks": {
+          "additionalProperties": {
+            "items": {
+              "$ref": "#/$defs/HookConfig"
+            },
+            "type": "array"
+          },
+          "type": "object",
+          "description": "User-defined shell commands that fire on hook events (e.g. PreToolUse)"
+        },
+        "env": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object",
+          "description": "Environment variables to set on startup"
         }
       },
       "additionalProperties": false,
       "type": "object"
     },
+    "HookConfig": {
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Friendly display name shown in the TUI for this hook"
+        },
+        "matcher": {
+          "type": "string",
+          "description": "Regex pattern tested against the tool name. Empty means match all tools."
+        },
+        "command": {
+          "type": "string",
+          "description": "Shell command to execute when the hook fires"
+        },
+        "timeout": {
+          "type": "integer",
+          "description": "Timeout in seconds for the hook command",
+          "default": 30
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "command"
+      ]
+    },
     "LSPConfig": {
       "properties": {
-        "enabled": {
+        "disabled": {
           "type": "boolean",
           "description": "Whether this LSP server is disabled",
           "default": false
@@ -60,15 +158,60 @@
           "type": "array",
           "description": "Arguments to pass to the LSP server command"
         },
+        "env": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object",
+          "description": "Environment variables to set to the LSP server command"
+        },
+        "filetypes": {
+          "items": {
+            "type": "string",
+            "examples": [
+              "go",
+              "mod",
+              "rs",
+              "c",
+              "js",
+              "ts"
+            ]
+          },
+          "type": "array",
+          "description": "File types this LSP server handles"
+        },
+        "root_markers": {
+          "items": {
+            "type": "string",
+            "examples": [
+              "go.mod",
+              "package.json",
+              "Cargo.toml"
+            ]
+          },
+          "type": "array",
+          "description": "Files or directories that indicate the project root"
+        },
+        "init_options": {
+          "type": "object",
+          "description": "Initialization options passed to the LSP server during initialize request"
+        },
         "options": {
-          "description": "LSP server-specific configuration options"
+          "type": "object",
+          "description": "LSP server-specific settings passed during initialization"
+        },
+        "timeout": {
+          "type": "integer",
+          "description": "Timeout in seconds for LSP server initialization",
+          "default": 30,
+          "examples": [
+            60,
+            120
+          ]
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "command"
-      ]
+      "type": "object"
     },
     "LSPs": {
       "additionalProperties": {
@@ -122,12 +265,64 @@
           "description": "Whether this MCP server is disabled",
           "default": false
         },
+        "disabled_tools": {
+          "items": {
+            "type": "string",
+            "examples": [
+              "get-library-doc"
+            ]
+          },
+          "type": "array",
+          "description": "List of tools from this MCP server to disable"
+        },
+        "enabled_tools": {
+          "items": {
+            "type": "string",
+            "examples": [
+              "get-library-doc"
+            ]
+          },
+          "type": "array",
+          "description": "Allow list of tools from this MCP server"
+        },
+        "timeout": {
+          "type": "integer",
+          "description": "Timeout in seconds for MCP server connections",
+          "default": 10,
+          "examples": [
+            30,
+            60,
+            120
+          ]
+        },
+        "sessionless": {
+          "type": "boolean",
+          "description": "Mark a sessionless MCP server (no Mcp-Session-Id) so Crush skips the subscriptions/listen stream it would otherwise reject. Leave unset to auto-detect known sessionless servers (e.g. GitHub MCP)",
+          "default": false
+        },
         "headers": {
           "additionalProperties": {
             "type": "string"
           },
           "type": "object",
           "description": "HTTP headers for HTTP/SSE MCP servers"
+        },
+        "oauth": {
+          "type": "boolean",
+          "description": "Enable OAuth 2.1 authorization flow for this MCP server (HTTP transport only)",
+          "default": false
+        },
+        "oauth_client_id": {
+          "type": "string",
+          "description": "Pre-registered OAuth client ID for servers without dynamic client registration"
+        },
+        "oauth_client_secret": {
+          "type": "string",
+          "description": "Pre-registered OAuth client secret paired with oauth_client_id"
+        },
+        "oauth_callback_port": {
+          "type": "integer",
+          "description": "Fixed localhost port for the OAuth callback"
         }
       },
       "additionalProperties": false,
@@ -171,14 +366,20 @@
         "can_reason": {
           "type": "boolean"
         },
-        "has_reasoning_efforts": {
-          "type": "boolean"
+        "reasoning_levels": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         },
         "default_reasoning_effort": {
           "type": "string"
         },
         "supports_attachments": {
           "type": "boolean"
+        },
+        "options": {
+          "$ref": "#/$defs/ModelOptions"
         }
       },
       "additionalProperties": false,
@@ -193,9 +394,53 @@
         "context_window",
         "default_max_tokens",
         "can_reason",
-        "has_reasoning_efforts",
         "supports_attachments"
       ]
+    },
+    "ModelOptions": {
+      "properties": {
+        "temperature": {
+          "type": "number"
+        },
+        "top_p": {
+          "type": "number"
+        },
+        "top_k": {
+          "type": "integer"
+        },
+        "frequency_penalty": {
+          "type": "number"
+        },
+        "presence_penalty": {
+          "type": "number"
+        },
+        "provider_options": {
+          "type": "object"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object"
+    },
+    "OAuthClient": {
+      "properties": {
+        "client_id": {
+          "type": "string"
+        },
+        "client_secret": {
+          "type": "string"
+        },
+        "auth_url": {
+          "type": "string"
+        },
+        "token_url": {
+          "type": "string"
+        },
+        "auth_style": {
+          "type": "integer"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object"
     },
     "Options": {
       "properties": {
@@ -209,6 +454,28 @@
           },
           "type": "array",
           "description": "Paths to files containing context information for the AI"
+        },
+        "global_context_paths": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Paths to files containing global context information for the AI",
+          "default": [
+            "~/.config/crush/CRUSH.md",
+            "~/.config/AGENTS.md"
+          ]
+        },
+        "skills_paths": {
+          "items": {
+            "type": "string",
+            "examples": [
+              "~/.config/crush/skills",
+              "./skills"
+            ]
+          },
+          "type": "array",
+          "description": "Paths to directories containing Agent Skills (folders with SKILL.md files)"
         },
         "tui": {
           "$ref": "#/$defs/TUIOptions",
@@ -231,10 +498,93 @@
         },
         "data_directory": {
           "type": "string",
-          "description": "Directory for storing application data (relative to working directory)",
+          "description": "Directory for storing application data. Relative paths are resolved against the working directory; absolute paths are used as-is.",
           "default": ".crush",
           "examples": [
             ".crush"
+          ]
+        },
+        "disabled_tools": {
+          "items": {
+            "type": "string",
+            "examples": [
+              "bash",
+              "sourcegraph"
+            ]
+          },
+          "type": "array",
+          "description": "List of built-in tools to disable and hide from the agent"
+        },
+        "disable_provider_auto_update": {
+          "type": "boolean",
+          "description": "Disable providers auto-update",
+          "default": false
+        },
+        "disable_default_providers": {
+          "type": "boolean",
+          "description": "Ignore all default/embedded providers. When enabled, providers must be fully specified in the config file with base_url, models, and api_key - no merging with defaults occurs",
+          "default": false
+        },
+        "attribution": {
+          "$ref": "#/$defs/Attribution",
+          "description": "Attribution settings for generated content"
+        },
+        "disable_metrics": {
+          "type": "boolean",
+          "description": "Disable sending metrics",
+          "default": false
+        },
+        "initialize_as": {
+          "type": "string",
+          "description": "Name of the context file to create/update during project initialization",
+          "default": "AGENTS.md",
+          "examples": [
+            "AGENTS.md",
+            "CRUSH.md",
+            "CLAUDE.md",
+            "docs/LLMs.md"
+          ]
+        },
+        "auto_lsp": {
+          "type": "boolean",
+          "description": "Automatically setup LSPs based on root markers",
+          "default": true
+        },
+        "progress": {
+          "type": "boolean",
+          "description": "Show indeterminate progress updates during long operations",
+          "default": true
+        },
+        "notifications": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "native",
+            "osc",
+            "bell",
+            "disabled"
+          ],
+          "description": "Notification style to use. Options: auto (default), native, osc, bell, disabled. Auto selects based on environment: native for local sessions, osc for SSH (with automatic OSC 99/777 detection).",
+          "default": "auto"
+        },
+        "disabled_skills": {
+          "items": {
+            "type": "string",
+            "examples": [
+              "crush-config"
+            ]
+          },
+          "type": "array",
+          "description": "List of skill names to disable and hide from the agent"
+        },
+        "request_timeout": {
+          "type": "integer",
+          "description": "Timeout in seconds for each LLM API request. Streaming responses are aborted only after this much inactivity, so slow but active streams are never killed. 0 disables it, negative values are invalid.",
+          "default": 60,
+          "examples": [
+            120,
+            300,
+            0
           ]
         }
       },
@@ -286,10 +636,20 @@
           "type": "string",
           "enum": [
             "openai",
+            "openai-compat",
+            "openrouter",
+            "vercel",
             "anthropic",
-            "gemini",
+            "google",
             "azure",
-            "vertexai"
+            "bedrock",
+            "google-vertex",
+            "hyper",
+            "litellm",
+            "llamacpp",
+            "lmstudio",
+            "ollama",
+            "omlx"
           ],
           "description": "Provider type that determines the API format",
           "default": "openai"
@@ -300,6 +660,10 @@
           "examples": [
             "$OPENAI_API_KEY"
           ]
+        },
+        "oauth": {
+          "$ref": "#/$defs/Token",
+          "description": "OAuth2 token for authentication with the provider"
         },
         "disable": {
           "type": "boolean",
@@ -319,7 +683,24 @@
         },
         "extra_body": {
           "type": "object",
-          "description": "Additional fields to include in request bodies"
+          "description": "Additional fields to include in request bodies, only works with openai-compatible providers"
+        },
+        "provider_options": {
+          "type": "object",
+          "description": "Additional provider-specific options for this provider"
+        },
+        "aws_auth_refresh": {
+          "type": "string",
+          "description": "Shell command to run when AWS credentials expire (Bedrock only)."
+        },
+        "flat_rate": {
+          "type": "boolean",
+          "description": "Flat-rate mode for this provider"
+        },
+        "discover_models": {
+          "type": "boolean",
+          "description": "Auto-discover models from /v1/models endpoint. When true with existing models they are merged (yours win)",
+          "default": true
         },
         "models": {
           "items": {
@@ -357,18 +738,51 @@
           ],
           "description": "Reasoning effort level for OpenAI models that support it"
         },
+        "think": {
+          "type": "boolean",
+          "description": "Enable thinking mode for Anthropic models that support reasoning"
+        },
         "max_tokens": {
           "type": "integer",
           "maximum": 200000,
-          "minimum": 1,
           "description": "Maximum number of tokens for model responses",
           "examples": [
             4096
           ]
         },
-        "think": {
-          "type": "boolean",
-          "description": "Enable thinking mode for Anthropic models that support reasoning"
+        "temperature": {
+          "type": "number",
+          "maximum": 1,
+          "minimum": 0,
+          "description": "Sampling temperature",
+          "examples": [
+            0.7
+          ]
+        },
+        "top_p": {
+          "type": "number",
+          "maximum": 1,
+          "minimum": 0,
+          "description": "Top-p (nucleus) sampling parameter",
+          "examples": [
+            0.9
+          ]
+        },
+        "top_k": {
+          "type": "integer",
+          "description": "Top-k sampling parameter"
+        },
+        "frequency_penalty": {
+          "type": "number",
+          "description": "Frequency penalty to reduce repetition"
+        },
+        "presence_penalty": {
+          "type": "number",
+          "description": "Presence penalty to increase topic diversity"
+        },
+        "provider_options": {
+          "type": "object",
+          "description": "Additional provider-specific options for the model"
         }
       },
       "additionalProperties": false,
@@ -384,6 +798,126 @@
           "type": "boolean",
           "description": "Enable compact mode for the TUI interface",
           "default": false
+        },
+        "diff_mode": {
+          "type": "string",
+          "enum": [
+            "unified",
+            "split"
+          ],
+          "description": "Diff mode for the TUI interface"
+        },
+        "completions": {
+          "$ref": "#/$defs/Completions",
+          "description": "Completions UI options"
+        },
+        "transparent": {
+          "type": "boolean",
+          "description": "Enable transparent background for the TUI interface",
+          "default": false
+        },
+        "scrollbar": {
+          "type": "string",
+          "enum": [
+            "default",
+            "always",
+            "never"
+          ],
+          "description": "Chat scrollbar visibility",
+          "default": "default"
+        },
+        "exit_banner": {
+          "type": "string",
+          "enum": [
+            "default",
+            "compact",
+            "none"
+          ],
+          "description": "Exit banner style after quitting Crush",
+          "default": "default"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object"
+    },
+    "Token": {
+      "properties": {
+        "access_token": {
+          "type": "string"
+        },
+        "refresh_token": {
+          "type": "string"
+        },
+        "expires_in": {
+          "type": "integer"
+        },
+        "expires_at": {
+          "type": "integer"
+        },
+        "client": {
+          "$ref": "#/$defs/OAuthClient"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "access_token",
+        "expires_in",
+        "expires_at"
+      ]
+    },
+    "ToolGlob": {
+      "properties": {
+        "timeout": {
+          "type": "integer",
+          "description": "Timeout for the glob tool call"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object"
+    },
+    "ToolGrep": {
+      "properties": {
+        "timeout": {
+          "type": "integer",
+          "description": "Timeout for the grep tool call"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object"
+    },
+    "ToolLs": {
+      "properties": {
+        "max_depth": {
+          "type": "integer",
+          "description": "Maximum depth for the ls tool",
+          "default": 0,
+          "examples": [
+            10
+          ]
+        },
+        "max_items": {
+          "type": "integer",
+          "description": "Maximum number of items to return for the ls tool",
+          "default": 1000,
+          "examples": [
+            100
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "type": "object"
+    },
+    "Tools": {
+      "properties": {
+        "ls": {
+          "$ref": "#/$defs/ToolLs"
+        },
+        "grep": {
+          "$ref": "#/$defs/ToolGrep"
+        },
+        "glob": {
+          "$ref": "#/$defs/ToolGlob"
         }
       },
       "additionalProperties": false,
