@@ -2,6 +2,7 @@ package ultraplan
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -144,6 +145,136 @@ func TestReviewHonoursContextCancellation(t *testing.T) {
 	select {
 	case err := <-errs:
 		require.ErrorIs(t, err, context.Canceled)
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for Review to return")
+	}
+}
+
+func TestReviewRefusesASecondConcurrentReview(t *testing.T) {
+	t.Parallel()
+
+	svc := NewService()
+	events := svc.Subscribe(t.Context())
+
+	errs := make(chan error, 1)
+	go func() {
+		_, err := svc.Review(t.Context(), testRequest())
+		errs <- err
+	}()
+
+	select {
+	case <-events:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for the first review")
+	}
+
+	// The incumbent must not be displaced: overwriting the pending
+	// state would strand it and then wipe the newcomer's on cleanup.
+	_, err := svc.Review(t.Context(), testRequest())
+	require.ErrorIs(t, err, ErrReviewPending)
+
+	require.True(t, svc.Respond(ReviewResponse{Verdicts: []DiagramVerdict{{ID: "flow", Accepted: true}}}))
+	select {
+	case err := <-errs:
+		require.NoError(t, err, "the first review still resolves normally")
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for the first review to return")
+	}
+}
+
+func TestCancelIsSafeToCallTwice(t *testing.T) {
+	t.Parallel()
+
+	// Ending a planning session cancels any review in flight, and the
+	// user may be pressing escape on that same review: a double close
+	// would panic.
+	svc := NewService()
+	events := svc.Subscribe(t.Context())
+
+	errs := make(chan error, 1)
+	go func() {
+		_, err := svc.Review(t.Context(), testRequest())
+		errs <- err
+	}()
+	select {
+	case <-events:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for the review request")
+	}
+
+	require.True(t, svc.Cancel())
+	require.False(t, svc.Cancel(), "a second cancel finds nothing pending")
+
+	select {
+	case err := <-errs:
+		require.ErrorIs(t, err, ErrCancelled)
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for Review to return")
+	}
+}
+
+func TestConcurrentCancelsDoNotPanic(t *testing.T) {
+	t.Parallel()
+
+	for range 50 {
+		svc := NewService()
+		events := svc.Subscribe(t.Context())
+		go func() {
+			_, _ = svc.Review(t.Context(), testRequest())
+		}()
+		select {
+		case <-events:
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for the review request")
+		}
+
+		var wg sync.WaitGroup
+		for range 4 {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				svc.Cancel()
+			}()
+		}
+		wg.Wait()
+	}
+}
+
+func TestRespondIgnoresAStaleRequestID(t *testing.T) {
+	t.Parallel()
+
+	svc := NewService()
+	events := svc.Subscribe(t.Context())
+
+	done := make(chan ReviewResponse, 1)
+	go func() {
+		resp, err := svc.Review(t.Context(), testRequest())
+		require.NoError(t, err)
+		done <- resp
+	}()
+
+	var published ReviewRequest
+	select {
+	case ev := <-events:
+		published = ev.Payload
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for the review request")
+	}
+
+	// A reply the user submitted against an earlier round must not
+	// land on this diagram set.
+	require.False(t, svc.Respond(ReviewResponse{
+		RequestID: "some-earlier-round",
+		Verdicts:  []DiagramVerdict{{ID: "flow", Accepted: true, Source: flowB}},
+	}))
+
+	require.True(t, svc.Respond(ReviewResponse{
+		RequestID: published.ID,
+		Verdicts:  []DiagramVerdict{{ID: "flow", Accepted: true}},
+	}))
+	select {
+	case resp := <-done:
+		require.Empty(t, resp.Verdicts[0].Source, "the stale edit must not have been applied")
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for Review to return")
 	}

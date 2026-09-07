@@ -235,18 +235,22 @@ func (p *Plan) ApplyResponse(resp ReviewResponse) {
 			p.Diagrams[i].EditedByUser = true
 		}
 		p.Diagrams[i].Feedback = strings.TrimSpace(v.Feedback)
+
+		// Validate whatever source the diagram now carries, whichever
+		// way the verdict went. A user edit that does not parse is the
+		// most useful thing we can tell the agent, and it is lost if
+		// the check only runs on the accepting branch: the UI refuses
+		// to accept a broken diagram, so that branch never sees one.
 		p.Diagrams[i].Problem = ""
-		switch {
-		case !v.Accepted:
-			p.Diagrams[i].Status = DiagramChangesRequested
-		default:
-			if err := ValidateMermaid(p.Diagrams[i].Source); err != nil {
-				p.Diagrams[i].Status = DiagramChangesRequested
-				p.Diagrams[i].Problem = err.Error()
-				continue
-			}
-			p.Diagrams[i].Status = DiagramAccepted
+		if err := ValidateMermaid(p.Diagrams[i].Source); err != nil {
+			p.Diagrams[i].Problem = err.Error()
 		}
+
+		if v.Accepted && p.Diagrams[i].Problem == "" {
+			p.Diagrams[i].Status = DiagramAccepted
+			continue
+		}
+		p.Diagrams[i].Status = DiagramChangesRequested
 	}
 
 	p.UpdatedAt = time.Now().Unix()

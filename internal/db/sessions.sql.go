@@ -251,6 +251,23 @@ func (q *Queries) UpdateSession(ctx context.Context, arg UpdateSessionParams) (S
 	return i, err
 }
 
+const updateSessionPlan = `-- name: UpdateSessionPlan :exec
+UPDATE sessions
+SET
+    plan = ?
+WHERE id = ?
+`
+
+type UpdateSessionPlanParams struct {
+	Plan sql.NullString `json:"plan"`
+	ID   string         `json:"id"`
+}
+
+func (q *Queries) UpdateSessionPlan(ctx context.Context, arg UpdateSessionPlanParams) error {
+	_, err := q.exec(ctx, q.updateSessionPlanStmt, updateSessionPlan, arg.Plan, arg.ID)
+	return err
+}
+
 const updateSessionTitleAndUsage = `-- name: UpdateSessionTitleAndUsage :exec
 UPDATE sessions
 SET

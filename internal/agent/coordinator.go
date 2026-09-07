@@ -763,9 +763,10 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 
 	// The question and ultraplan tools both block on the user, so they
 	// are interactive-only and never handed to sub-agents.
+	ultraplanAvailable := !isSubAgent && c.interactive && c.reviews != nil
 	if !isSubAgent && c.interactive {
 		allTools = append(allTools, tools.NewQuestionTool(c.questions))
-		if c.reviews != nil {
+		if ultraplanAvailable {
 			allTools = append(allTools, tools.NewUltraplanTool(c.sessions, c.reviews))
 		}
 	}
@@ -832,7 +833,7 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 	// without hook interception to avoid firing the user's hook N times
 	// per delegated turn. The top-level invocation of the sub-agent tool
 	// itself is still wrapped from the coder's side.
-	filteredTools = wrapToolsWithUltraplanGate(filteredTools, c.sessions, isSubAgent)
+	filteredTools = wrapToolsWithUltraplanGate(filteredTools, c.sessions, isSubAgent, ultraplanAvailable)
 	filteredTools = wrapToolsWithHooks(filteredTools, hookRunner, isSubAgent)
 
 	return filteredTools, nil

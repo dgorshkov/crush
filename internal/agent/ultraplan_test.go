@@ -66,7 +66,7 @@ func draftingPlan() *ultraplan.Plan {
 func runGated(t *testing.T, sessions session.Service, sessionID, toolName, input string) (fantasy.ToolResponse, bool) {
 	t.Helper()
 	ran := false
-	gated := wrapToolsWithUltraplanGate([]fantasy.AgentTool{newStubTool(toolName, &ran)}, sessions, false)
+	gated := wrapToolsWithUltraplanGate([]fantasy.AgentTool{newStubTool(toolName, &ran)}, sessions, false, true)
 	require.Len(t, gated, 1)
 
 	ctx := context.WithValue(t.Context(), tools.SessionIDContextKey, sessionID)
@@ -165,7 +165,7 @@ func TestUltraplanGateSkipsUngatedToolsAndSubAgents(t *testing.T) {
 	// wrapped at all.
 	subRan := false
 	subTools := wrapToolsWithUltraplanGate(
-		[]fantasy.AgentTool{newStubTool(tools.EditToolName, &subRan)}, sessions, true,
+		[]fantasy.AgentTool{newStubTool(tools.EditToolName, &subRan)}, sessions, true, true,
 	)
 	ctx := context.WithValue(t.Context(), tools.SessionIDContextKey, sess.ID)
 	_, err := subTools[0].Run(ctx, fantasy.ToolCall{Name: tools.EditToolName, Input: "{}"})
@@ -177,6 +177,67 @@ func TestUltraplanGateWithoutASessionID(t *testing.T) {
 	sessions := newTestSessions(t)
 	_, ran := runGated(t, sessions, "", tools.EditToolName, "{}")
 	require.True(t, ran, "a call with no session cannot be in a planning session")
+}
+
+func TestUltraplanGateIsNotInstalledWithoutTheTool(t *testing.T) {
+	sessions := newTestSessions(t)
+	sess := sessionWithPlan(t, sessions, draftingPlan())
+
+	// A non-interactive run has no ultraplan tool in its schema, so
+	// gating writes would lock the session with no way out.
+	ran := false
+	gated := wrapToolsWithUltraplanGate(
+		[]fantasy.AgentTool{newStubTool(tools.EditToolName, &ran)}, sessions, false, false,
+	)
+	ctx := context.WithValue(t.Context(), tools.SessionIDContextKey, sess.ID)
+	_, err := gated[0].Run(ctx, fantasy.ToolCall{Name: tools.EditToolName, Input: "{}"})
+	require.NoError(t, err)
+	require.True(t, ran, "without the escape hatch the gate must not be installed")
+}
+
+func TestPlanningReadOnlyCommand(t *testing.T) {
+	t.Parallel()
+
+	allowed := []string{
+		"ls -la",
+		"cat internal/agent/ultraplan.go",
+		"rg --files-with-matches ultraplan",
+		"grep -rn TODO internal",
+		"git log --oneline -20",
+		"git status",
+		"find . -name '*.go'",
+		"wc -l internal/ultraplan/mermaid.go",
+	}
+	for _, cmd := range allowed {
+		require.True(t, planningReadOnlyCommand(cmd), "should be allowed: %s", cmd)
+	}
+
+	// Everything here reaches the workspace despite a harmless looking
+	// first word. The bash tool's own allow-list says yes to several of
+	// them, which is exactly why this gate does not reuse it.
+	refused := []string{
+		"echo pwned > /etc/passwd",
+		"cat x >> y",
+		"ls > listing.txt",
+		"timeout 5 rm -rf build",
+		"nice make install",
+		"nohup ./deploy.sh",
+		"env FOO=1 rm -rf build",
+		"kill -9 1",
+		"killall node",
+		"git log && rm -rf build",
+		"git status; rm -rf build",
+		"ls | xargs rm",
+		"echo $(rm -rf build)",
+		"rm -rf build",
+		"go build ./...",
+		"grepfoo something",
+		"",
+		"   ",
+	}
+	for _, cmd := range refused {
+		require.False(t, planningReadOnlyCommand(cmd), "should be refused: %s", cmd)
+	}
 }
 
 func TestUltraplanReminder(t *testing.T) {

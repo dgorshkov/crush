@@ -66,11 +66,11 @@ func (b *Backend) StartUltraplan(ctx context.Context, workspaceID string, req pr
 		return false, nil
 	}
 
-	current.Plan = &ultraplan.Plan{
+	plan := &ultraplan.Plan{
 		Status: ultraplan.StatusDrafting,
 		Goal:   strings.TrimSpace(req.Goal),
 	}
-	if _, err := ws.Sessions.Save(ctx, current); err != nil {
+	if err := ws.Sessions.SavePlan(ctx, req.SessionID, plan); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -101,7 +101,7 @@ func (b *Backend) AbandonUltraplan(ctx context.Context, workspaceID string, req 
 	ws.Reviews.Cancel()
 
 	current.Plan.Abandon()
-	if _, err := ws.Sessions.Save(ctx, current); err != nil {
+	if err := ws.Sessions.SavePlan(ctx, req.SessionID, current.Plan); err != nil {
 		return false, err
 	}
 	return true, nil

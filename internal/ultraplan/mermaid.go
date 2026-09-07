@@ -417,21 +417,37 @@ func checkBrackets(mode bracketMode, body []sourceLine) error {
 	lastOpen := map[rune]int{}
 	for _, line := range body {
 		inQuotes := false
+		prev := rune(0)
 		for _, r := range line.text {
 			if r == '"' {
 				inQuotes = !inQuotes
+				prev = r
 				continue
 			}
 			if inQuotes {
+				prev = r
+				continue
+			}
+			// Mermaid's asymmetric node shape opens with ">" and closes
+			// with "]", as in "A>flag]". Recognise it only at bracket
+			// depth zero and directly after an id character, so an
+			// arrow ("-->") and a comparison inside a label
+			// ("A[x >= y]") are both left alone.
+			if mode == bracketsAll && r == '>' && counts['['] == 0 && isIDChar(prev) {
+				counts['[']++
+				lastOpen['['] = line.num
+				prev = r
 				continue
 			}
 			p, ok := watched[r]
 			if !ok {
+				prev = r
 				continue
 			}
 			if r == p.open {
 				counts[p.open]++
 				lastOpen[p.open] = line.num
+				prev = r
 				continue
 			}
 			counts[p.open]--
@@ -441,6 +457,7 @@ func checkBrackets(mode bracketMode, body []sourceLine) error {
 					line.num, string(p.close), string(p.open),
 				)
 			}
+			prev = r
 		}
 	}
 
@@ -544,6 +561,14 @@ func typeNames() []string {
 		names = append(names, dt.name)
 	}
 	return names
+}
+
+// isIDChar reports whether r can appear in a Mermaid node id.
+func isIDChar(r rune) bool {
+	return r == '_' ||
+		(r >= 'a' && r <= 'z') ||
+		(r >= 'A' && r <= 'Z') ||
+		(r >= '0' && r <= '9')
 }
 
 func firstWord(s string) string {

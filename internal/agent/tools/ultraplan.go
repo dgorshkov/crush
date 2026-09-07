@@ -96,8 +96,7 @@ func NewUltraplanTool(sessions session.Service, reviews ultraplan.Service) fanta
 			}
 			plan.Propose(strings.TrimSpace(params.Summary), proposed)
 
-			current.Plan = plan
-			if current, err = sessions.Save(ctx, current); err != nil {
+			if err := sessions.SavePlan(ctx, sessionID, plan); err != nil {
 				return fantasy.ToolResponse{}, fmt.Errorf("failed to save plan: %w", err)
 			}
 
@@ -112,8 +111,7 @@ func NewUltraplanTool(sessions session.Service, reviews ultraplan.Service) fanta
 			if err != nil {
 				if errors.Is(err, ultraplan.ErrCancelled) {
 					plan.Abandon()
-					current.Plan = plan
-					if _, saveErr := sessions.Save(ctx, current); saveErr != nil {
+					if saveErr := sessions.SavePlan(ctx, sessionID, plan); saveErr != nil {
 						return fantasy.ToolResponse{}, fmt.Errorf("failed to save plan: %w", saveErr)
 					}
 					out := fantasy.NewTextErrorResponse(
@@ -126,8 +124,7 @@ func NewUltraplanTool(sessions session.Service, reviews ultraplan.Service) fanta
 			}
 
 			plan.ApplyResponse(resp)
-			current.Plan = plan
-			if _, err := sessions.Save(ctx, current); err != nil {
+			if err := sessions.SavePlan(ctx, sessionID, plan); err != nil {
 				return fantasy.ToolResponse{}, fmt.Errorf("failed to save plan: %w", err)
 			}
 

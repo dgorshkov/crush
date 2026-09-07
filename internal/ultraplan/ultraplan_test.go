@@ -148,6 +148,41 @@ func TestApplyResponseRejectsAnAcceptedButInvalidUserEdit(t *testing.T) {
 	require.False(t, p.Implementing)
 }
 
+func TestApplyResponseReportsAnInvalidEditEvenWhenRejected(t *testing.T) {
+	t.Parallel()
+
+	// This is the shape the TUI actually produces: it refuses to accept
+	// a diagram that does not parse, so the verdict arrives rejected and
+	// the parse error still has to reach the agent.
+	p := &Plan{}
+	p.Propose("", []Diagram{{ID: "flow", Title: "Flow", Source: flowA}})
+	p.ApplyResponse(ReviewResponse{Verdicts: []DiagramVerdict{{
+		ID:       "flow",
+		Accepted: false,
+		Source:   "flowchart TD\n    A[Start --> B",
+	}}})
+
+	require.Equal(t, DiagramChangesRequested, p.Diagrams[0].Status)
+	require.Contains(t, p.Diagrams[0].Problem, "unclosed square bracket")
+}
+
+func TestApplyResponseClearsAStaleProblemOnceRepaired(t *testing.T) {
+	t.Parallel()
+
+	p := &Plan{}
+	p.Propose("", []Diagram{{ID: "flow", Title: "Flow", Source: flowA}})
+	p.ApplyResponse(ReviewResponse{Verdicts: []DiagramVerdict{
+		{ID: "flow", Accepted: false, Source: "flowchart TD\n    A[Start --> B"},
+	}})
+	require.NotEmpty(t, p.Diagrams[0].Problem)
+
+	p.ApplyResponse(ReviewResponse{Verdicts: []DiagramVerdict{
+		{ID: "flow", Accepted: true, Source: flowB},
+	}})
+	require.Empty(t, p.Diagrams[0].Problem)
+	require.Equal(t, DiagramAccepted, p.Diagrams[0].Status)
+}
+
 func TestAbandon(t *testing.T) {
 	t.Parallel()
 

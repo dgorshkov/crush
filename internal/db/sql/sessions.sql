@@ -53,6 +53,12 @@ SET
 WHERE id = ?
 RETURNING *;
 
+-- name: UpdateSessionPlan :exec
+UPDATE sessions
+SET
+    plan = ?
+WHERE id = ?;
+
 -- name: UpdateSessionTitleAndUsage :exec
 UPDATE sessions
 SET

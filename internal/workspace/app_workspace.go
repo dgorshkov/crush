@@ -302,7 +302,7 @@ func (w *AppWorkspace) UltraplanAbandon(ctx context.Context, sessionID string) b
 	// blocked on a plan that no longer exists.
 	w.app.Reviews.Cancel()
 	current.Plan.Abandon()
-	if _, err := w.app.Sessions.Save(ctx, current); err != nil {
+	if err := w.app.Sessions.SavePlan(ctx, sessionID, current.Plan); err != nil {
 		slog.Error("Failed to end a planning session", "error", err, "session_id", sessionID)
 		return false
 	}
@@ -321,11 +321,11 @@ func (w *AppWorkspace) UltraplanStart(ctx context.Context, sessionID, goal strin
 	if current.Plan.Active() {
 		return false
 	}
-	current.Plan = &ultraplan.Plan{
+	plan := &ultraplan.Plan{
 		Status: ultraplan.StatusDrafting,
 		Goal:   strings.TrimSpace(goal),
 	}
-	if _, err := w.app.Sessions.Save(ctx, current); err != nil {
+	if err := w.app.Sessions.SavePlan(ctx, sessionID, plan); err != nil {
 		slog.Error("Failed to start a planning session", "error", err, "session_id", sessionID)
 		return false
 	}

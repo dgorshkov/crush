@@ -137,6 +137,19 @@ flowchart TD
 			kind: "gantt",
 		},
 		{
+			name: "asymmetric flag node shape",
+			source: `flowchart TD
+    A>flag] --> B
+    C>another] --> D`,
+			kind: "flowchart",
+		},
+		{
+			name: "comparison inside a label is not a flag shape",
+			source: `flowchart TD
+    A[x >= y] --> B[count > 0]`,
+			kind: "flowchart",
+		},
+		{
 			name: "capitalized End node id is fine",
 			source: `flowchart TD
     Start --> End`,
@@ -220,6 +233,12 @@ func TestValidateMermaidInvalid(t *testing.T) {
 			source: `flowchart TD
     A[Start --> B[End]`,
 			wantErr: "unclosed square bracket",
+		},
+		{
+			name: "stray closing bracket is still caught",
+			source: `flowchart TD
+    A --> B]`,
+			wantErr: `closing "]" with no matching "["`,
 		},
 		{
 			name: "unbalanced quote",

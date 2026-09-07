@@ -9,6 +9,7 @@ import (
 
 	"github.com/charmbracelet/crush/internal/pubsub"
 	"github.com/charmbracelet/crush/internal/session"
+	"github.com/charmbracelet/crush/internal/ultraplan"
 	"github.com/stretchr/testify/require"
 )
 
@@ -58,6 +59,10 @@ func (m *mockSessionService) List(context.Context) ([]session.Session, error) {
 
 func (m *mockSessionService) Save(_ context.Context, s session.Session) (session.Session, error) {
 	return s, nil
+}
+
+func (m *mockSessionService) SavePlan(context.Context, string, *ultraplan.Plan) error {
+	return nil
 }
 
 func (m *mockSessionService) UpdateTitleAndUsage(context.Context, string, string, int64, int64, float64) error {

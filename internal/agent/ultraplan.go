@@ -42,8 +42,19 @@ type ultraplanGate struct {
 // wrapToolsWithUltraplanGate wraps the tools that change the workspace
 // so they are refused during a planning session. Sub-agents are left
 // alone: they run read-only tool sets of their own.
-func wrapToolsWithUltraplanGate(agentTools []fantasy.AgentTool, sessions session.Service, isSubAgent bool) []fantasy.AgentTool {
-	if sessions == nil || isSubAgent {
+//
+// The gate is only installed where the ultraplan tool itself is
+// available. Without that pairing a non-interactive run against a
+// session with an open plan would have every write refused and be told
+// to call a tool that is not in its schema — a lockout with no way
+// out.
+func wrapToolsWithUltraplanGate(
+	agentTools []fantasy.AgentTool,
+	sessions session.Service,
+	isSubAgent bool,
+	ultraplanAvailable bool,
+) []fantasy.AgentTool {
+	if sessions == nil || isSubAgent || !ultraplanAvailable {
 		return agentTools
 	}
 	out := make([]fantasy.AgentTool, len(agentTools))
@@ -106,15 +117,86 @@ func (g *ultraplanGate) planActive(ctx context.Context) bool {
 	return current.Plan.Active()
 }
 
-// bashCallIsReadOnly reports whether a bash tool call runs one of the
-// known read-only commands. Input we cannot parse is treated as not
-// read-only.
+// planningReadOnlyCommands are the shell commands a planning session
+// may still run. It is deliberately narrower than the allow-list the
+// bash tool uses to skip permission prompts: that one answers "is this
+// worth interrupting the user for?", while this one has to answer "can
+// this change anything?", and it must never answer yes wrongly.
+//
+// Every command that runs another command is excluded, however
+// harmless it looks on its own — "timeout", "nice", "nohup", "env",
+// "xargs" and friends all launder an arbitrary command through a safe
+// looking prefix. So are the process killers.
+var planningReadOnlyCommands = []string{
+	// Inspecting the tree.
+	"cat", "file", "find", "head", "ls", "pwd", "stat", "tail", "tree", "wc",
+	// Searching it.
+	"ag", "ack", "fd", "grep", "rg",
+	// Read-only git.
+	"git blame", "git branch", "git config --get", "git config --list",
+	"git describe", "git diff", "git grep", "git log", "git ls-files",
+	"git ls-remote", "git remote", "git rev-parse", "git shortlog",
+	"git show", "git status", "git tag",
+	// Describing the machine.
+	"date", "df", "du", "free", "groups", "hostname", "id", "printenv",
+	"ps", "uname", "uptime", "whoami", "which",
+}
+
+// redirectionOperators are shell constructs that write somewhere. The
+// bash tool's chaining check does not look for these, so a planning
+// session has to reject them itself: "echo x > file" is otherwise a
+// read-only command that rewrites a file.
+var redirectionOperators = []string{">", "<"}
+
+// planningReadOnlyCommand reports whether a shell command is one this
+// gate is willing to run during a planning session. It errs towards
+// false: refusing a harmless command costs the agent a different way
+// of looking something up, while allowing a harmful one breaks the
+// promise the mode is built on.
+func planningReadOnlyCommand(command string) bool {
+	trimmed := strings.TrimSpace(command)
+	if trimmed == "" {
+		return false
+	}
+	if containsRedirection(trimmed) || strings.ContainsAny(trimmed, "\n\r") {
+		return false
+	}
+	// Chaining and substitution can hide anything at all behind a safe
+	// looking first word.
+	if strings.ContainsAny(trimmed, ";|&`") || strings.Contains(trimmed, "$(") {
+		return false
+	}
+
+	lower := strings.ToLower(trimmed)
+	for _, safe := range planningReadOnlyCommands {
+		if !strings.HasPrefix(lower, safe) {
+			continue
+		}
+		// Require a word boundary so "grepfoo" does not pass as "grep".
+		if len(lower) == len(safe) || lower[len(safe)] == ' ' || lower[len(safe)] == '-' {
+			return true
+		}
+	}
+	return false
+}
+
+// containsRedirection reports whether a command redirects its input or
+// output.
+func containsRedirection(command string) bool {
+	return slices.ContainsFunc(redirectionOperators, func(op string) bool {
+		return strings.Contains(command, op)
+	})
+}
+
+// bashCallIsReadOnly reports whether a bash tool call runs a command a
+// planning session may execute. Input we cannot parse is treated as
+// not read-only.
 func bashCallIsReadOnly(input string) bool {
 	var params tools.BashParams
 	if err := json.Unmarshal([]byte(input), &params); err != nil {
 		return false
 	}
-	return tools.IsSafeReadOnlyCommand(params.Command)
+	return planningReadOnlyCommand(params.Command)
 }
 
 // ultraplanReminder returns the system reminder describing the state of

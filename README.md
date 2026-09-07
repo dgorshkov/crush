@@ -572,8 +572,12 @@ can pick it up whenever you like.
 While a plan is open, tools that change the workspace — `edit`, `write`,
 `multiedit`, `download`, the LSP refactors, and any shell command that isn't
 plainly read-only — are refused. Reading, searching and asking all still work,
-which is most of what planning is. To leave without a plan, run the command
-again (it reads **End Planning Session**) or press `esc` in the review.
+which is most of what planning is. The shell allow-list used here is
+deliberately narrower than the one that decides whether to prompt you for
+permission: it rejects redirection and anything that runs another command, so
+`timeout`, `nice` and `echo x > file` are all refused during planning. To leave
+without a plan, run the command again (it reads **End Planning Session**) or
+press `esc` in the review.
 
 Plans are stored on the session alongside its to-do list, so they survive
 restarts and are visible to every client attached to the workspace.

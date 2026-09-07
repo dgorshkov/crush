@@ -15,6 +15,11 @@ import (
 // planning session instead of ruling on the diagrams.
 var ErrCancelled = errors.New("planning session cancelled by user")
 
+// ErrReviewPending is returned by Review when another review is
+// already in front of the user. Only one can be pending at a time,
+// because a review owns the editor area until it resolves.
+var ErrReviewPending = errors.New("a plan review is already awaiting a response")
+
 // ReviewRequest is the envelope published to the UI when the agent
 // puts a diagram set in front of the user.
 type ReviewRequest struct {
@@ -112,11 +117,14 @@ type Service interface {
 	SubscribeNotifications(ctx context.Context) <-chan pubsub.Event[Notification]
 
 	// Review publishes a diagram set and blocks until the user
-	// responds or the context is cancelled.
+	// responds or the context is cancelled. It returns
+	// ErrReviewPending when another review is already awaiting a
+	// response.
 	Review(ctx context.Context, req ReviewRequest) (ReviewResponse, error)
 
 	// Respond resolves the pending review. It reports false when no
-	// review is pending.
+	// review is pending, or when the response carries a request ID
+	// that is not the pending one.
 	Respond(resp ReviewResponse) bool
 
 	// Cancel abandons the pending review. It reports false when no
@@ -162,42 +170,69 @@ func (s *service) Review(ctx context.Context, req ReviewRequest) (ReviewResponse
 	}
 
 	s.mu.Lock()
-	s.pending = make(chan ReviewResponse, 1)
-	s.cancelled = make(chan struct{})
+	// Claiming the slot under the lock keeps a second reviewer from
+	// stranding the first: without it the newcomer would overwrite the
+	// channels the incumbent is blocked on, and the incumbent's
+	// deferred cleanup would then wipe the newcomer's state.
+	if s.pending != nil {
+		s.mu.Unlock()
+		return ReviewResponse{}, ErrReviewPending
+	}
+	pending := make(chan ReviewResponse, 1)
+	cancelled := make(chan struct{})
+	s.pending = pending
+	s.cancelled = cancelled
 	s.pendingID = req.ID
 	s.mu.Unlock()
 
 	defer func() {
 		s.mu.Lock()
-		s.pending = nil
-		s.cancelled = nil
-		s.pendingID = ""
+		// Only clear state this review still owns. Respond and Cancel
+		// release the slot themselves, so by the time we get here a
+		// later review may legitimately hold it.
+		if s.pendingID == req.ID {
+			s.pending = nil
+			s.cancelled = nil
+			s.pendingID = ""
+		}
 		s.mu.Unlock()
 	}()
 
 	s.broker.Publish(pubsub.CreatedEvent, req)
 
+	// Read from the locals rather than the fields: the fields are
+	// cleared by the deferred cleanup, and reading them here would
+	// race with it.
 	select {
 	case <-ctx.Done():
 		return ReviewResponse{}, ctx.Err()
-	case <-s.cancelled:
+	case <-cancelled:
 		return ReviewResponse{}, ErrCancelled
-	case resp := <-s.pending:
+	case resp := <-pending:
 		resp.RequestID = req.ID
 		return normalizeResponse(resp), nil
 	}
 }
 
-// Respond resolves the pending review.
+// Respond resolves the pending review. A response carrying a request
+// ID is only applied to that review, so a reply the user submitted
+// against an earlier round cannot land on the current diagram set.
 func (s *service) Respond(resp ReviewResponse) bool {
 	s.mu.Lock()
 	ch := s.pending
 	requestID := s.pendingID
-	s.mu.Unlock()
-
-	if ch == nil {
+	if ch == nil || (resp.RequestID != "" && resp.RequestID != requestID) {
+		s.mu.Unlock()
 		return false
 	}
+	// Release the whole slot under the same lock that claimed it:
+	// whoever resolves a review first wins, and a later Respond or
+	// Cancel finds nothing pending.
+	s.pending = nil
+	s.cancelled = nil
+	s.pendingID = ""
+	s.mu.Unlock()
+
 	ch <- resp
 
 	if requestID != "" {
@@ -206,17 +241,25 @@ func (s *service) Respond(resp ReviewResponse) bool {
 	return true
 }
 
-// Cancel abandons the pending review.
+// Cancel abandons the pending review. It is safe to call from more
+// than one place at once: ending a planning session cancels any review
+// in flight, and the user may be pressing escape on that same review.
 func (s *service) Cancel() bool {
 	s.mu.Lock()
 	cancelCh := s.cancelled
 	requestID := s.pendingID
-	s.mu.Unlock()
-
 	if cancelCh == nil {
+		s.mu.Unlock()
 		return false
 	}
+	// Release the whole slot and close under the lock. Closing outside
+	// it lets two callers reach the same channel and panic on the
+	// second close.
+	s.pending = nil
+	s.cancelled = nil
+	s.pendingID = ""
 	close(cancelCh)
+	s.mu.Unlock()
 
 	if requestID != "" {
 		s.notificationBroker.Publish(pubsub.CreatedEvent, Notification{RequestID: requestID})

@@ -285,6 +285,38 @@ func TestUltraplanToolCancellationAbandonsThePlan(t *testing.T) {
 	require.False(t, stored.Plan.Active(), "abandoning a plan releases the mode gate")
 }
 
+func TestUltraplanToolDoesNotClobberConcurrentSessionWrites(t *testing.T) {
+	sessions := newPlanTestSessions(t)
+	reviews := ultraplan.NewService()
+	created, err := sessions.Create(t.Context(), "New Session")
+	require.NoError(t, err)
+
+	responses, _ := callUltraplan(t, sessions, reviews, created.ID, UltraplanParams{
+		Summary:  "first pass",
+		Diagrams: []UltraplanDiagram{{ID: "flow", Title: "Flow", Mermaid: planFlowA}},
+	})
+
+	// A review blocks for as long as the user takes, and title
+	// generation lands on the same row meanwhile. Saving the whole
+	// session struct fetched before the review would roll this back.
+	require.NoError(t, sessions.Rename(t.Context(), created.ID, "Add a rate limiter"))
+	require.NoError(t, sessions.UpdateTitleAndUsage(t.Context(), created.ID, "Add a rate limiter", 1200, 340, 0.05))
+
+	require.True(t, reviews.Respond(ultraplan.ReviewResponse{
+		Verdicts:            []ultraplan.DiagramVerdict{{ID: "flow", Accepted: true}},
+		StartImplementation: true,
+	}))
+	awaitResponse(t, responses)
+
+	stored, err := sessions.Get(t.Context(), created.ID)
+	require.NoError(t, err)
+	require.Equal(t, "Add a rate limiter", stored.Title, "the generated title must survive the plan save")
+	require.Equal(t, int64(1200), stored.PromptTokens, "usage accounting must survive the plan save")
+	require.Equal(t, int64(340), stored.CompletionTokens)
+	require.InDelta(t, 0.05, stored.Cost, 1e-9)
+	require.Equal(t, ultraplan.StatusAccepted, stored.Plan.Status)
+}
+
 func TestUltraplanToolRequiresASession(t *testing.T) {
 	tool := NewUltraplanTool(newPlanTestSessions(t), ultraplan.NewService())
 	_, err := tool.Run(t.Context(), fantasy.ToolCall{ID: "call-1", Name: UltraplanToolName, Input: "{}"})
