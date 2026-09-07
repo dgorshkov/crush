@@ -1,6 +1,7 @@
 package dialog
 
 import (
+	"context"
 	"testing"
 
 	"charm.land/bubbles/v2/key"
@@ -340,14 +341,22 @@ func TestReviewCursorStaysInRange(t *testing.T) {
 	require.Equal(t, 0, review.cursor)
 }
 
-func TestReviewEditKeyIsOfferedOnlyWithAnEditor(t *testing.T) {
+func TestReviewEditKeysReflectWhatIsAvailable(t *testing.T) {
 	t.Parallel()
 
+	// The in-TUI source editor is always available; the external one
+	// only when $EDITOR is set, which the UI signals by wiring OnEdit.
 	review, _ := newTestReview(t, twoDiagrams())
-	require.NotContains(t, helpKeys(review.ShortHelp()), "e")
+	require.Contains(t, helpKeys(review.ShortHelp()), "e")
+	require.NotContains(t, helpKeys(review.ShortHelp()), "E")
 
 	review.OnEdit = func(string, string, string) tea.Cmd { return nil }
-	require.Contains(t, helpKeys(review.ShortHelp()), "e")
+	require.Contains(t, helpKeys(review.ShortHelp()), "E")
+
+	// The picture/source toggle is pointless without a renderer.
+	require.NotContains(t, helpKeys(review.ShortHelp()), "v")
+	review.SetPreviewRenderer(func(context.Context, string) ([]byte, error) { return nil, nil })
+	require.Contains(t, helpKeys(review.ShortHelp()), "v")
 }
 
 func helpKeys(bindings []key.Binding) []string {

@@ -59,6 +59,7 @@ import (
 	"github.com/charmbracelet/crush/internal/ui/styles"
 	"github.com/charmbracelet/crush/internal/ui/util"
 	"github.com/charmbracelet/crush/internal/ultraplan"
+	"github.com/charmbracelet/crush/internal/ultraplan/mermaidcli"
 	"github.com/charmbracelet/crush/internal/version"
 	"github.com/charmbracelet/crush/internal/workspace"
 	uv "github.com/charmbracelet/ultraviolet"
@@ -1002,7 +1003,9 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case pubsub.Event[question.Notification]:
 		m.handleQuestionNotification(msg.Payload)
 	case pubsub.Event[ultraplan.ReviewRequest]:
-		m.openUltraplanReview(msg.Payload)
+		if cmd := m.openUltraplanReview(msg.Payload); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
 		if cmd := m.chat.ScrollToBottomAndAnimate(); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
@@ -1017,6 +1020,19 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case ultraplanEditMsg:
 		if review, ok := m.activeInline.(*dialog.UltraplanReview); ok {
 			review.ApplyEdit(msg.DiagramID, msg.Source)
+			m.updateLayoutAndSize()
+		}
+	case dialog.UltraplanRenderTickMsg:
+		if review, ok := m.activeInline.(*dialog.UltraplanReview); ok {
+			if cmd := review.HandleRenderTick(msg.Gen); cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+		}
+	case dialog.UltraplanRenderedMsg:
+		if review, ok := m.activeInline.(*dialog.UltraplanReview); ok {
+			if cmd := review.HandleRendered(msg); cmd != nil {
+				cmds = append(cmds, cmd)
+			}
 			m.updateLayoutAndSize()
 		}
 	case cancelTimerExpiredMsg:
@@ -4703,8 +4719,9 @@ func (m *UI) toggleUltraplan() tea.Cmd {
 	))
 }
 
-// openUltraplanReview activates the plan review in the editor area.
-func (m *UI) openUltraplanReview(req ultraplan.ReviewRequest) {
+// openUltraplanReview activates the plan review in the editor area and
+// returns the command that draws its first diagram.
+func (m *UI) openUltraplanReview(req ultraplan.ReviewRequest) tea.Cmd {
 	review := dialog.NewUltraplanReview(m.com.Styles, req)
 	review.OnRespond = func(resp ultraplan.ReviewResponse) {
 		m.com.Workspace.UltraplanRespond(resp)
@@ -4715,11 +4732,53 @@ func (m *UI) openUltraplanReview(req ultraplan.ReviewRequest) {
 	if os.Getenv("EDITOR") != "" {
 		review.OnEdit = m.openDiagramEditor
 	}
+	m.configureUltraplanPreviews(review)
+
 	m.activeInline = review
 	m.textarea.Blur()
 	m.focus = uiFocusEditor
 	m.activeInline.SetFocused(true)
 	m.updateLayoutAndSize()
+	return review.InitialCmd()
+}
+
+// configureUltraplanPreviews gives the review a way to draw diagrams,
+// when this machine and terminal can manage it. Everything here is
+// optional: with no Mermaid CLI the review shows diagram source, which
+// is what it did before previews existed.
+func (m *UI) configureUltraplanPreviews(review *dialog.UltraplanReview) {
+	cellW, cellH := m.caps.CellSize()
+	_, isTmux := m.caps.Env.LookupEnv("TMUX")
+	review.SetPreviewCapabilities(m.caps.SupportsKittyGraphics(), cellW, cellH, isTmux)
+
+	// Give the source editor up to half the terminal: it holds an
+	// editor and a picture, which the list does not.
+	if m.height > 0 {
+		review.SetMaxHeight(m.height / 2)
+	}
+
+	if !mermaidcli.Available() {
+		return
+	}
+	review.SetPreviewRenderer(func(ctx context.Context, source string) ([]byte, error) {
+		return mermaidcli.Render(ctx, source, mermaidcli.Options{
+			Theme:      m.mermaidTheme(),
+			Background: "transparent",
+		})
+	})
+}
+
+// mermaidTheme picks the Mermaid theme a preview is drawn with.
+//
+// Crush's own themes are dark, so a dark diagram is the right default;
+// there is no light/dark signal to read here. Anyone on a light
+// terminal can set CRUSH_MERMAID_THEME to one of Mermaid's other
+// themes, such as "default", "forest" or "neutral".
+func (m *UI) mermaidTheme() string {
+	if theme := strings.TrimSpace(os.Getenv("CRUSH_MERMAID_THEME")); theme != "" {
+		return theme
+	}
+	return "dark"
 }
 
 // handleUltraplanNotification dismisses an open plan review once any

@@ -9,6 +9,7 @@ import (
 	"charm.land/bubbles/v2/textarea"
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/crush/internal/ui/common"
+	fimage "github.com/charmbracelet/crush/internal/ui/image"
 	"github.com/charmbracelet/crush/internal/ui/styles"
 	"github.com/charmbracelet/crush/internal/ultraplan"
 	uv "github.com/charmbracelet/ultraviolet"
@@ -31,6 +32,9 @@ const (
 	// stageImplement is the question asked once every diagram is
 	// accepted: build it now, or not yet.
 	stageImplement
+	// stageSource is the Mermaid source editor, with live validation
+	// and a live preview beside it.
+	stageSource
 )
 
 // noteTargetPlan marks the note editor as editing the plan-wide
@@ -68,16 +72,42 @@ type UltraplanReview struct {
 	lastWidth    int
 	heightDirty  bool
 
-	keyUpDown    key.Binding
-	keyAccept    key.Binding
-	keyAcceptAll key.Binding
-	keyComment   key.Binding
-	keyEdit      key.Binding
-	keyExpand    key.Binding
-	keyFeedback  key.Binding
-	keySubmit    key.Binding
-	keyClose     key.Binding
-	keyLeftRight key.Binding
+	// maxHeight caps the rows the review may claim. The UI sets it
+	// from the terminal height so the source editor can use more room
+	// than the list without swallowing the conversation.
+	maxHeight int
+
+	// Source editing.
+	sourceEditor  textarea.Model
+	sourceTarget  int
+	sourceProblem string
+
+	// Preview rendering.
+	renderer       PreviewRenderer
+	imgEnc         fimage.Encoding
+	cellSize       fimage.CellSize
+	isTmux         bool
+	previews       map[string]previewState
+	pendingRender  pendingRender
+	renderGen      int
+	renderInFlight bool
+	// showSource makes an expanded diagram show its source even when a
+	// picture is available.
+	showSource bool
+
+	keyUpDown     key.Binding
+	keyAccept     key.Binding
+	keyAcceptAll  key.Binding
+	keyComment    key.Binding
+	keyEdit       key.Binding
+	keyExpand     key.Binding
+	keyFeedback   key.Binding
+	keySubmit     key.Binding
+	keyClose      key.Binding
+	keyLeftRight  key.Binding
+	keySaveSource key.Binding
+	keyExternal   key.Binding
+	keyToggleView key.Binding
 
 	// OnRespond is called with the completed review when the user
 	// submits. The UI wires this to workspace submission.
@@ -112,25 +142,39 @@ func NewUltraplanReview(sty *styles.Styles, req ultraplan.ReviewRequest) *Ultrap
 	}
 
 	r := &UltraplanReview{
-		Styles:       sty,
-		Request:      req,
-		verdicts:     verdicts,
-		expanded:     expanded,
-		noteTarget:   noteTargetPlan,
-		keyUpDown:    key.NewBinding(key.WithKeys("up", "down"), key.WithHelp("↑/↓", "move")),
-		keyAccept:    key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "accept")),
-		keyAcceptAll: key.NewBinding(key.WithKeys("A"), key.WithHelp("A", "accept all")),
-		keyComment:   key.NewBinding(key.WithKeys("c"), key.WithHelp("c", "comment")),
-		keyEdit:      key.NewBinding(key.WithKeys("e"), key.WithHelp("e", "edit source")),
-		keyExpand:    key.NewBinding(key.WithKeys("space"), key.WithHelp("space", "show source")),
-		keyFeedback:  key.NewBinding(key.WithKeys("f"), key.WithHelp("f", "note on plan")),
-		keySubmit:    key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "submit")),
-		keyClose:     CloseKey,
-		keyLeftRight: key.NewBinding(key.WithKeys("left", "right", "h", "l"), key.WithHelp("←/→", "switch")),
+		Styles:        sty,
+		Request:       req,
+		verdicts:      verdicts,
+		expanded:      expanded,
+		noteTarget:    noteTargetPlan,
+		keyUpDown:     key.NewBinding(key.WithKeys("up", "down"), key.WithHelp("↑/↓", "move")),
+		keyAccept:     key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "accept")),
+		keyAcceptAll:  key.NewBinding(key.WithKeys("A"), key.WithHelp("A", "accept all")),
+		keyComment:    key.NewBinding(key.WithKeys("c"), key.WithHelp("c", "comment")),
+		keyEdit:       key.NewBinding(key.WithKeys("e"), key.WithHelp("e", "edit source")),
+		keyExpand:     key.NewBinding(key.WithKeys("space"), key.WithHelp("space", "show source")),
+		keyFeedback:   key.NewBinding(key.WithKeys("f"), key.WithHelp("f", "note on plan")),
+		keySubmit:     key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "submit")),
+		keyClose:      CloseKey,
+		keyLeftRight:  key.NewBinding(key.WithKeys("left", "right", "h", "l"), key.WithHelp("←/→", "switch")),
+		keySaveSource: key.NewBinding(key.WithKeys("ctrl+s"), key.WithHelp("ctrl+s", "save")),
+		keyExternal:   key.NewBinding(key.WithKeys("E"), key.WithHelp("E", "$EDITOR")),
+		keyToggleView: key.NewBinding(key.WithKeys("v"), key.WithHelp("v", "picture/source")),
+		sourceTarget:  -1,
+		previews:      make(map[string]previewState),
 	}
 	r.noteEditor = newQuestionTextarea(sty, "What needs to change?", 800)
 	r.noteEditor.MaxHeight = 6
+	r.sourceEditor = newSourceTextarea(sty)
 	return r
+}
+
+// SetMaxHeight caps how many rows the review may claim.
+func (r *UltraplanReview) SetMaxHeight(rows int) {
+	if rows > 0 {
+		r.maxHeight = rows
+		r.heightDirty = true
+	}
 }
 
 // diagramCount returns how many diagrams are under review.
@@ -202,6 +246,8 @@ func (r *UltraplanReview) HandleKey(msg tea.KeyPressMsg) (bool, tea.Cmd) {
 		return r.handleNoteStageKey(msg)
 	case stageImplement:
 		return r.handleImplementStageKey(msg)
+	case stageSource:
+		return r.handleSourceStageKey(msg)
 	default:
 		return r.handleListKey(msg)
 	}
@@ -222,7 +268,7 @@ func (r *UltraplanReview) handleListKey(msg tea.KeyPressMsg) (bool, tea.Cmd) {
 			r.cursor = min(r.submitRow(), r.cursor+1)
 		}
 		r.heightDirty = true
-		return false, nil
+		return false, r.previewForCursor()
 
 	case key.Matches(msg, r.keySubmit):
 		if r.cursor == r.submitRow() || r.allAccepted() {
@@ -254,6 +300,16 @@ func (r *UltraplanReview) handleListKey(msg tea.KeyPressMsg) (bool, tea.Cmd) {
 		if r.cursor < r.diagramCount() {
 			r.expanded[r.cursor] = !r.expanded[r.cursor]
 			r.heightDirty = true
+			if r.expanded[r.cursor] {
+				return false, r.previewForCursor()
+			}
+		}
+		return false, nil
+
+	case key.Matches(msg, r.keyToggleView):
+		if r.previewsEnabled() {
+			r.showSource = !r.showSource
+			r.heightDirty = true
 		}
 		return false, nil
 
@@ -267,6 +323,12 @@ func (r *UltraplanReview) handleListKey(msg tea.KeyPressMsg) (bool, tea.Cmd) {
 		return false, r.openNoteEditor(noteTargetPlan)
 
 	case key.Matches(msg, r.keyEdit):
+		if r.cursor < r.diagramCount() {
+			return false, r.openSourceEditor(r.cursor)
+		}
+		return false, nil
+
+	case key.Matches(msg, r.keyExternal):
 		if r.cursor < r.diagramCount() && r.OnEdit != nil {
 			d := r.Request.Diagrams[r.cursor]
 			return false, r.OnEdit(d.ID, d.Title, d.Source)
@@ -313,6 +375,22 @@ func (r *UltraplanReview) handleImplementStageKey(msg tea.KeyPressMsg) (bool, te
 		return r.respond()
 	}
 	return false, nil
+}
+
+// previewForCursor asks for a picture of the diagram the cursor is on,
+// so moving through the list brings each one up without the user
+// having to ask.
+func (r *UltraplanReview) previewForCursor() tea.Cmd {
+	if r.cursor >= r.diagramCount() {
+		return nil
+	}
+	return r.requestPreview(r.cursor, r.Request.Diagrams[r.cursor].Source)
+}
+
+// InitialCmd asks for a picture of the first diagram so the review
+// opens with something drawn rather than waiting for a keystroke.
+func (r *UltraplanReview) InitialCmd() tea.Cmd {
+	return r.previewForCursor()
 }
 
 // toggleAccept flips the verdict on the diagram under the cursor. A
@@ -406,22 +484,39 @@ func (r *UltraplanReview) ShortHelp() []key.Binding {
 		}
 	case stageImplement:
 		return []key.Binding{r.keyLeftRight, r.keySubmit, r.keyClose}
+	case stageSource:
+		return []key.Binding{r.keySaveSource, r.keyClose}
 	default:
-		bindings := []key.Binding{r.keyUpDown, r.keyAccept, r.keyAcceptAll, r.keyComment}
+		bindings := []key.Binding{r.keyUpDown, r.keyAccept, r.keyAcceptAll, r.keyComment, r.keyEdit}
 		if r.OnEdit != nil {
-			bindings = append(bindings, r.keyEdit)
+			bindings = append(bindings, r.keyExternal)
 		}
-		return append(bindings, r.keyExpand, r.keyFeedback, r.keySubmit)
+		bindings = append(bindings, r.keyExpand)
+		if r.previewsEnabled() {
+			bindings = append(bindings, r.keyToggleView)
+		}
+		return append(bindings, r.keyFeedback, r.keySubmit)
 	}
 }
 
 // Height returns the number of content lines the review needs at the
 // given width, capped so the transcript above stays visible.
 func (r *UltraplanReview) Height(width int) int {
-	if r.stage == stageNote {
+	switch r.stage {
+	case stageNote:
 		return r.noteHeight(r.contentWidth(width))
+	case stageSource:
+		return min(r.sourceHeight(r.contentWidth(width)), r.heightBudget())
 	}
-	return min(len(r.buildLines(r.contentWidth(width))), maxReviewHeight)
+	return min(len(r.buildLines(r.contentWidth(width))), r.heightBudget())
+}
+
+// heightBudget is the most rows the review may claim.
+func (r *UltraplanReview) heightBudget() int {
+	if r.maxHeight > 0 {
+		return max(r.maxHeight, maxReviewHeight)
+	}
+	return maxReviewHeight
 }
 
 // noteHeight is the height of the note pane: a header, a blank line,
@@ -442,14 +537,20 @@ func (r *UltraplanReview) HeightChanged() bool {
 // SetFocused records whether the editor area holds focus.
 func (r *UltraplanReview) SetFocused(focused bool) { r.focused = focused }
 
-// HandlePaste forwards a paste into the note editor.
+// HandlePaste forwards a paste into whichever editor is open. Pasting
+// a diagram into the source editor is the obvious way to bring one in
+// from elsewhere, so it has to reach the right textarea.
 func (r *UltraplanReview) HandlePaste(msg tea.PasteMsg) tea.Cmd {
-	if r.stage != stageNote {
+	switch r.stage {
+	case stageSource:
+		return r.HandleSourcePaste(msg)
+	case stageNote:
+		var cmd tea.Cmd
+		r.noteEditor, cmd = r.noteEditor.Update(msg)
+		return cmd
+	default:
 		return nil
 	}
-	var cmd tea.Cmd
-	r.noteEditor, cmd = r.noteEditor.Update(msg)
-	return cmd
 }
 
 // contentWidth clamps the drawing width to something readable.
@@ -470,12 +571,15 @@ func (r *UltraplanReview) Draw(scr uv.Screen, area uv.Rectangle) *tea.Cursor {
 	r.lastWidth = area.Dx()
 	w := r.contentWidth(area.Dx())
 
-	if r.stage == stageNote {
+	switch r.stage {
+	case stageNote:
 		return r.drawNote(scr, area, w)
+	case stageSource:
+		return r.drawSource(scr, area, w)
 	}
 
 	lines := r.buildLines(w)
-	viewport := min(area.Dy(), maxReviewHeight)
+	viewport := min(area.Dy(), r.heightBudget())
 	r.clampScroll(lines, viewport)
 
 	y := area.Min.Y
@@ -633,8 +737,20 @@ func (r *UltraplanReview) pushDiagram(
 	}
 
 	if r.expanded[i] {
-		for _, srcLine := range strings.Split(d.Source, "\n") {
-			push(sty.Tool.ContentCodeLine.Render(ansi.Truncate("    "+srcLine, width, "…")), i)
+		// The list is the record of what is being reviewed, so it only
+		// shows a picture that matches the source it stands for.
+		lines := r.previewLines(d.ID)
+		if len(lines) > 0 && r.previewIsCurrent(d.ID, d.Source) && !r.showSource {
+			for _, previewLine := range lines {
+				push(previewLine, i)
+			}
+		} else {
+			for _, srcLine := range strings.Split(d.Source, "\n") {
+				push(sty.Tool.ContentCodeLine.Render(ansi.Truncate("    "+srcLine, width, "…")), i)
+			}
+		}
+		if statusLine := r.previewStatus(sty, d.ID, width); statusLine != "" {
+			push(statusLine, i)
 		}
 	}
 	push("", i)

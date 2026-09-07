@@ -549,16 +549,52 @@ Open the command palette and pick **Ultraplan: Plan with Diagrams**, then type
 what you want built. Crush reads the code, proposes a diagram set, and hands it
 to you for review. For each diagram you can:
 
-| Key     | Action                                                    |
-| ------- | --------------------------------------------------------- |
-| `a`     | accept it                                                  |
-| `A`     | accept everything                                          |
-| `c`     | ask for a change, in your own words                        |
-| `e`     | edit the Mermaid source in `$EDITOR`                       |
-| `space` | show or hide the source                                    |
-| `f`     | leave a note on the plan as a whole                        |
-| `enter` | submit the round                                           |
-| `esc`   | end the planning session without accepting                 |
+| Key      | Action                                                   |
+| -------- | -------------------------------------------------------- |
+| `a`      | accept it                                                 |
+| `A`      | accept everything                                         |
+| `c`      | ask for a change, in your own words                       |
+| `e`      | edit the Mermaid source in place                          |
+| `E`      | edit it in `$EDITOR` instead                              |
+| `space`  | expand or collapse it                                     |
+| `v`      | switch the expanded view between picture and source       |
+| `f`      | leave a note on the plan as a whole                       |
+| `enter`  | submit the round                                          |
+| `esc`    | end the planning session without accepting                |
+
+Pressing `e` opens the diagram's source in an editor inside the review.
+Validation runs on every keystroke, so a stray bracket is flagged as you type
+rather than after you save; `ctrl+s` applies the edit and `esc` discards it. An
+edited diagram always goes back for a fresh decision, since you have just
+changed what you would be accepting.
+
+### Seeing the diagrams drawn
+
+If the [Mermaid CLI](https://github.com/mermaid-js/mermaid-cli) is on your
+`PATH`, Crush draws the diagrams rather than only showing their source — in the
+review list, and beside the editor while you type, re-rendering shortly after
+you pause.
+
+```bash
+npm install -g @mermaid-js/mermaid-cli
+```
+
+This is entirely optional. Without it the review shows Mermaid source, which is
+what it does anyway for a diagram that does not currently parse. Pictures work
+in any terminal: where Kitty graphics are available Crush uses them, and
+elsewhere it falls back to a block-character rendering.
+
+A few environment variables adjust it:
+
+| Variable                           | Effect                                              |
+| ---------------------------------- | --------------------------------------------------- |
+| `CRUSH_MERMAID_THEME`              | Mermaid theme; defaults to `dark`                    |
+| `CRUSH_MERMAID_CLI`                | run a different binary instead of `mmdc`             |
+| `CRUSH_MERMAID_PUPPETEER_CONFIG`   | Puppeteer config file, for sandboxed environments    |
+
+The picture is never the thing you accept — the Mermaid source is. Where a
+render fails or lags behind an edit, the review says so instead of showing you
+a diagram that is not the one under review.
 
 Anything you leave unaccepted goes back to Crush with your feedback, and the
 next round shows up the same way. The diagram set is free to grow or shrink
