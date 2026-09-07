@@ -58,6 +58,7 @@ import (
 	"github.com/charmbracelet/crush/internal/ui/notification"
 	"github.com/charmbracelet/crush/internal/ui/styles"
 	"github.com/charmbracelet/crush/internal/ui/util"
+	"github.com/charmbracelet/crush/internal/ultraplan"
 	"github.com/charmbracelet/crush/internal/version"
 	"github.com/charmbracelet/crush/internal/workspace"
 	uv "github.com/charmbracelet/ultraviolet"
@@ -115,6 +116,13 @@ const (
 
 type openEditorMsg struct {
 	Text string
+}
+
+// ultraplanEditMsg carries Mermaid source back from the user's editor
+// into the open plan review.
+type ultraplanEditMsg struct {
+	DiagramID string
+	Source    string
 }
 
 type shellResultMsg struct {
@@ -254,6 +262,10 @@ type UI struct {
 
 	// Active inline editor replaces the textarea when non-nil.
 	activeInline dialog.InlineEditor
+
+	// ultraplanArmed makes the next submitted prompt open an Ultraplan
+	// planning session instead of going straight to work.
+	ultraplanArmed bool
 	// inlineCursor stores the cursor from the last inline editor
 	// Draw call, used by the cursor positioning logic below.
 	inlineCursor *tea.Cursor
@@ -989,6 +1001,24 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case pubsub.Event[question.Notification]:
 		m.handleQuestionNotification(msg.Payload)
+	case pubsub.Event[ultraplan.ReviewRequest]:
+		m.openUltraplanReview(msg.Payload)
+		if cmd := m.chat.ScrollToBottomAndAnimate(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+		if cmd := m.sendNotification(notification.Notification{
+			Title:   "Crush is waiting...",
+			Message: fmt.Sprintf("%d plan diagram(s) need your review", len(msg.Payload.Diagrams)),
+		}); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+	case pubsub.Event[ultraplan.Notification]:
+		m.handleUltraplanNotification(msg.Payload)
+	case ultraplanEditMsg:
+		if review, ok := m.activeInline.(*dialog.UltraplanReview); ok {
+			review.ApplyEdit(msg.DiagramID, msg.Source)
+			m.updateLayoutAndSize()
+		}
 	case cancelTimerExpiredMsg:
 		m.isCanceling = false
 	case tea.TerminalVersionMsg:
@@ -1919,6 +1949,9 @@ func (m *UI) handleDialogMsg(msg tea.Msg) tea.Cmd {
 	// Command dialog messages.
 	case dialog.ActionToggleYoloMode:
 		m.toggleYoloMode()
+		m.dialog.CloseDialog(dialog.CommandsID)
+	case dialog.ActionToggleUltraplan:
+		cmds = append(cmds, m.toggleUltraplan())
 		m.dialog.CloseDialog(dialog.CommandsID)
 	case dialog.ActionSelectNotificationStyle:
 		cfg := m.com.Config()
@@ -4242,7 +4275,14 @@ func (m *UI) sendMessage(content string, attachments ...message.Attachment) tea.
 	m.agentBusyCache.set(true)
 	m.busyFetchGen++
 	m.invalidatePromptQueue()
+	// Ultraplan is armed one prompt at a time: the prompt the user just
+	// typed becomes the goal of the planning session.
+	armUltraplan := m.ultraplanArmed
+	m.ultraplanArmed = false
 	cmds = append(cmds, func() tea.Msg {
+		if armUltraplan {
+			m.com.Workspace.UltraplanStart(context.Background(), sessionID, content)
+		}
 		// AgentRun is fire-and-forget: it returns once the prompt has
 		// been accepted (HTTP 202) or synchronously with a validation
 		// or transport error. Run failures and cancellation surface
@@ -4500,7 +4540,7 @@ func (m *UI) openCommandsDialog() tea.Cmd {
 	hasTodos := hasSession && hasIncompleteTodos(m.session.Todos)
 	hasQueue := m.promptQueue > 0
 
-	commands, err := dialog.NewCommands(m.com, sessionID, hasSession, hasTodos, hasQueue, m.customCommands, m.mcpPrompts)
+	commands, err := dialog.NewCommands(m.com, sessionID, hasSession, hasTodos, hasQueue, m.ultraplanState(), m.customCommands, m.mcpPrompts)
 	if err != nil {
 		return util.ReportError(err)
 	}
@@ -4626,6 +4666,109 @@ func (m *UI) handleQuestionNotification(_ question.Notification) {
 		m.textarea.Focus()
 		m.updateLayoutAndSize()
 	}
+}
+
+// ultraplanState reports where the current session stands with
+// Ultraplan, so the command palette can name the right action.
+func (m *UI) ultraplanState() dialog.UltraplanState {
+	if m.hasSession() && m.session.Plan.Active() {
+		return dialog.UltraplanActive
+	}
+	if m.ultraplanArmed {
+		return dialog.UltraplanArmed
+	}
+	return dialog.UltraplanOff
+}
+
+// toggleUltraplan arms Ultraplan for the next prompt, disarms it, or
+// ends a planning session already under way.
+func (m *UI) toggleUltraplan() tea.Cmd {
+	if m.hasSession() && m.session.Plan.Active() {
+		sessionID := m.session.ID
+		return func() tea.Msg {
+			if !m.com.Workspace.UltraplanAbandon(context.Background(), sessionID) {
+				return util.NewWarnMsg("No planning session to end.")
+			}
+			return util.NewInfoMsg("Planning session ended. The plan was not accepted.")
+		}
+	}
+	if m.ultraplanArmed {
+		m.ultraplanArmed = false
+		return util.CmdHandler(util.NewInfoMsg("Ultraplan off."))
+	}
+	m.ultraplanArmed = true
+	return util.CmdHandler(util.NewInfoMsg(
+		"Ultraplan armed: your next message starts a planning session. " +
+			"Crush will propose Mermaid diagrams and leave the workspace alone until you accept them.",
+	))
+}
+
+// openUltraplanReview activates the plan review in the editor area.
+func (m *UI) openUltraplanReview(req ultraplan.ReviewRequest) {
+	review := dialog.NewUltraplanReview(m.com.Styles, req)
+	review.OnRespond = func(resp ultraplan.ReviewResponse) {
+		m.com.Workspace.UltraplanRespond(resp)
+	}
+	review.OnCancel = func() {
+		m.com.Workspace.UltraplanCancel()
+	}
+	if os.Getenv("EDITOR") != "" {
+		review.OnEdit = m.openDiagramEditor
+	}
+	m.activeInline = review
+	m.textarea.Blur()
+	m.focus = uiFocusEditor
+	m.activeInline.SetFocused(true)
+	m.updateLayoutAndSize()
+}
+
+// handleUltraplanNotification dismisses an open plan review once any
+// client has resolved it. Only one review can be pending at a time, so
+// any notification makes the current form stale.
+func (m *UI) handleUltraplanNotification(_ ultraplan.Notification) {
+	if _, ok := m.activeInline.(*dialog.UltraplanReview); ok {
+		m.activeInline = nil
+		m.textarea.Focus()
+		m.updateLayoutAndSize()
+	}
+}
+
+// openDiagramEditor opens one diagram's Mermaid source in the user's
+// editor and feeds the result back into the review.
+func (m *UI) openDiagramEditor(diagramID, title, source string) tea.Cmd {
+	tmpfile, err := os.CreateTemp("", "crush_diagram_*.mmd")
+	if err != nil {
+		return util.ReportError(err)
+	}
+	tmpPath := tmpfile.Name()
+	defer tmpfile.Close() //nolint:errcheck
+	if _, err := tmpfile.WriteString(source); err != nil {
+		return util.ReportError(err)
+	}
+
+	cmd, err := editor.Command("crush", tmpPath)
+	if err != nil {
+		return util.ReportError(err)
+	}
+	return tea.ExecProcess(cmd, func(err error) tea.Msg {
+		defer func() {
+			_ = os.Remove(tmpPath)
+		}()
+		if err != nil {
+			return util.ReportError(err)
+		}
+		content, err := os.ReadFile(tmpPath)
+		if err != nil {
+			return util.ReportError(err)
+		}
+		if len(strings.TrimSpace(string(content))) == 0 {
+			return util.ReportWarn(fmt.Sprintf("%s is empty; keeping the previous source", title))
+		}
+		return ultraplanEditMsg{
+			DiagramID: diagramID,
+			Source:    string(content),
+		}
+	})
 }
 
 // editorContentWidth returns the content width available to the

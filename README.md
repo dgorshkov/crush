@@ -538,6 +538,52 @@ To disable tools from MCP servers, see the [MCP config section](#mcps).
 You can also skip all permission prompts completely by running Crush with the
 `--yolo` flag. Be very, very careful with this feature.
 
+### Ultraplan: agreeing on the plan first
+
+For work where starting in the wrong place is expensive, Ultraplan mode makes
+Crush settle the design with you before it writes anything. The plan is a set
+of [Mermaid](https://mermaid.js.org) diagrams rather than prose, so what you
+are agreeing to is a picture you can argue with.
+
+Open the command palette and pick **Ultraplan: Plan with Diagrams**, then type
+what you want built. Crush reads the code, proposes a diagram set, and hands it
+to you for review. For each diagram you can:
+
+| Key     | Action                                                    |
+| ------- | --------------------------------------------------------- |
+| `a`     | accept it                                                  |
+| `A`     | accept everything                                          |
+| `c`     | ask for a change, in your own words                        |
+| `e`     | edit the Mermaid source in `$EDITOR`                       |
+| `space` | show or hide the source                                    |
+| `f`     | leave a note on the plan as a whole                        |
+| `enter` | submit the round                                           |
+| `esc`   | end the planning session without accepting                 |
+
+Anything you leave unaccepted goes back to Crush with your feedback, and the
+next round shows up the same way. The diagram set is free to grow or shrink
+along the way: a plan often starts as one flowchart and ends up as three.
+
+The session ends only when every diagram is valid Mermaid **and** you have
+accepted all of them. At that point Crush asks whether to start implementing.
+Say no and nothing is touched; the accepted plan stays on the session, and you
+can pick it up whenever you like.
+
+While a plan is open, tools that change the workspace — `edit`, `write`,
+`multiedit`, `download`, the LSP refactors, and any shell command that isn't
+plainly read-only — are refused. Reading, searching and asking all still work,
+which is most of what planning is. To leave without a plan, run the command
+again (it reads **End Planning Session**) or press `esc` in the review.
+
+Plans are stored on the session alongside its to-do list, so they survive
+restarts and are visible to every client attached to the workspace.
+
+Diagram sources are checked before they reach you: a missing diagram type,
+an unclosed `subgraph`, unbalanced brackets, and a few other reliable
+breakages are bounced straight back to the agent. The check is structural
+rather than a full Mermaid parse, so it catches the common failures without
+promising every accepted diagram renders.
+
 ### Disabling Skills
 
 You can prevent Crush from using certain skills entirely. Disabled skills are

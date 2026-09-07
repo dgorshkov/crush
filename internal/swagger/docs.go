@@ -1579,6 +1579,105 @@ const docTemplate = `{
                 }
             }
         },
+        "/workspaces/{id}/mcp/auth": {
+            "post": {
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "mcp"
+                ],
+                "summary": "Authenticate an MCP server",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Workspace ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "MCP name request",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/proto.MCPNameRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/proto.MCPAuthResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/proto.Error"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/proto.Error"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/proto.Error"
+                        }
+                    }
+                }
+            }
+        },
+        "/workspaces/{id}/mcp/auth-url": {
+            "get": {
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "mcp"
+                ],
+                "summary": "Get MCP OAuth authorization URL",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Workspace ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "MCP server name",
+                        "name": "name",
+                        "in": "query",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/proto.MCPAuthResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/proto.Error"
+                        }
+                    }
+                }
+            }
+        },
         "/workspaces/{id}/mcp/docker/disable": {
             "post": {
                 "tags": [
@@ -1688,6 +1787,49 @@ const docTemplate = `{
                         "description": "Bad Request",
                         "schema": {
                             "$ref": "#/definitions/proto.Error"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/proto.Error"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/proto.Error"
+                        }
+                    }
+                }
+            }
+        },
+        "/workspaces/{id}/mcp/pending-auth": {
+            "get": {
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "mcp"
+                ],
+                "summary": "Get MCP servers pending OAuth",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Workspace ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "array",
+                            "items": {
+                                "$ref": "#/definitions/proto.MCPPendingAuthServer"
+                            }
                         }
                     },
                     "404": {
@@ -2993,6 +3135,214 @@ const docTemplate = `{
                     }
                 }
             }
+        },
+        "/workspaces/{id}/ultraplan/abandon": {
+            "post": {
+                "consumes": [
+                    "application/json"
+                ],
+                "tags": [
+                    "ultraplan"
+                ],
+                "summary": "End an Ultraplan planning session",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Workspace ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "Session to release",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/proto.UltraplanAbandonRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/proto.UltraplanAbandonResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/proto.Error"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/proto.Error"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/proto.Error"
+                        }
+                    }
+                }
+            }
+        },
+        "/workspaces/{id}/ultraplan/cancel": {
+            "post": {
+                "tags": [
+                    "ultraplan"
+                ],
+                "summary": "Cancel an Ultraplan review",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Workspace ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/proto.UltraplanRespondResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/proto.Error"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/proto.Error"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/proto.Error"
+                        }
+                    }
+                }
+            }
+        },
+        "/workspaces/{id}/ultraplan/respond": {
+            "post": {
+                "consumes": [
+                    "application/json"
+                ],
+                "tags": [
+                    "ultraplan"
+                ],
+                "summary": "Respond to an Ultraplan review",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Workspace ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "Diagram review response",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/proto.UltraplanReviewResponse"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/proto.UltraplanRespondResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/proto.Error"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/proto.Error"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/proto.Error"
+                        }
+                    }
+                }
+            }
+        },
+        "/workspaces/{id}/ultraplan/start": {
+            "post": {
+                "consumes": [
+                    "application/json"
+                ],
+                "tags": [
+                    "ultraplan"
+                ],
+                "summary": "Start an Ultraplan planning session",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Workspace ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "Planning session goal",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/proto.UltraplanStartRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/proto.UltraplanStartResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/proto.Error"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/proto.Error"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/proto.Error"
+                        }
+                    }
+                }
+            }
         }
     },
     "definitions": {
@@ -3091,6 +3441,19 @@ const docTemplate = `{
                     "type": "integer"
                 }
             }
+        },
+        "config.ExitBanner": {
+            "type": "string",
+            "enum": [
+                "default",
+                "compact",
+                "none"
+            ],
+            "x-enum-varnames": [
+                "ExitBannerDefault",
+                "ExitBannerCompact",
+                "ExitBannerNone"
+            ]
         },
         "config.HookConfig": {
             "type": "object",
@@ -3229,6 +3592,10 @@ const docTemplate = `{
                         }
                     ]
                 },
+                "sessionless": {
+                    "description": "Sessionless marks a server that does not maintain an MCP session (it\nnever issues a Mcp-Session-Id). When true, Crush omits the\ntools/prompts/resources list-changed handlers: the go-sdk opens a\nSEP-2575 \"subscriptions/listen\" stream whenever any of those handlers\nis set, and sessionless streamable-HTTP servers (e.g. GitHub MCP)\nanswer that POST with 404 (\"session not found\"), which the SDK treats\nas fatal. The cost is no live list-changed notifications from this\nserver.\n\nWhen nil, Crush auto-detects a set of known sessionless servers (see\nIsSessionless); set it explicitly to override that detection.",
+                    "type": "boolean"
+                },
                 "timeout": {
                     "type": "integer"
                 },
@@ -3337,6 +3704,9 @@ const docTemplate = `{
                 },
                 "diff_mode": {
                     "type": "string"
+                },
+                "exit_banner": {
+                    "$ref": "#/definitions/config.ExitBanner"
                 },
                 "scrollbar": {
                     "type": "string"
@@ -3531,6 +3901,9 @@ const docTemplate = `{
                 "progress": {
                     "type": "boolean"
                 },
+                "request_timeout": {
+                    "type": "integer"
+                },
                 "skills_paths": {
                     "type": "array",
                     "items": {
@@ -3562,12 +3935,27 @@ const docTemplate = `{
                 "id": {
                     "type": "string"
                 },
+                "is_summary_message": {
+                    "type": "boolean"
+                },
                 "model": {
                     "type": "string"
                 },
                 "parts": {
                     "type": "array",
                     "items": {}
+                },
+                "prism_dollar_savings": {
+                    "type": "number"
+                },
+                "prism_hypercredit_savings": {
+                    "type": "number"
+                },
+                "prism_model_id": {
+                    "type": "string"
+                },
+                "prism_model_name": {
+                    "type": "string"
                 },
                 "provider": {
                     "type": "string"
@@ -3716,6 +4104,9 @@ const docTemplate = `{
                 },
                 "parent_session_id": {
                     "type": "string"
+                },
+                "plan": {
+                    "$ref": "#/definitions/proto.Plan"
                 },
                 "prompt_tokens": {
                     "type": "integer"
@@ -3924,6 +4315,15 @@ const docTemplate = `{
                 }
             }
         },
+        "proto.MCPAuthResponse": {
+            "type": "object",
+            "properties": {
+                "auth_url": {
+                    "description": "AuthURL is the OAuth authorization URL the user must visit, when\nthe flow is still in progress.",
+                    "type": "string"
+                }
+            }
+        },
         "proto.MCPClientInfo": {
             "type": "object",
             "properties": {
@@ -3977,6 +4377,17 @@ const docTemplate = `{
             "type": "object",
             "properties": {
                 "name": {
+                    "type": "string"
+                }
+            }
+        },
+        "proto.MCPPendingAuthServer": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string"
+                },
+                "url": {
                     "type": "string"
                 }
             }
@@ -4134,6 +4545,35 @@ const docTemplate = `{
                 }
             }
         },
+        "proto.Plan": {
+            "type": "object",
+            "properties": {
+                "diagrams": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/proto.UltraplanDiagram"
+                    }
+                },
+                "goal": {
+                    "type": "string"
+                },
+                "implementing": {
+                    "type": "boolean"
+                },
+                "round": {
+                    "type": "integer"
+                },
+                "status": {
+                    "type": "string"
+                },
+                "summary": {
+                    "type": "string"
+                },
+                "updated_at": {
+                    "type": "integer"
+                }
+            }
+        },
         "proto.ProjectInitPromptResponse": {
             "type": "object",
             "properties": {
@@ -4254,6 +4694,9 @@ const docTemplate = `{
                 },
                 "parent_session_id": {
                     "type": "string"
+                },
+                "plan": {
+                    "$ref": "#/definitions/proto.Plan"
                 },
                 "prompt_tokens": {
                     "type": "integer"
@@ -4379,6 +4822,118 @@ const docTemplate = `{
                 },
                 "status": {
                     "type": "string"
+                }
+            }
+        },
+        "proto.UltraplanAbandonRequest": {
+            "type": "object",
+            "properties": {
+                "session_id": {
+                    "type": "string"
+                }
+            }
+        },
+        "proto.UltraplanAbandonResponse": {
+            "type": "object",
+            "properties": {
+                "abandoned": {
+                    "type": "boolean"
+                }
+            }
+        },
+        "proto.UltraplanDiagram": {
+            "type": "object",
+            "properties": {
+                "edited_by_user": {
+                    "type": "boolean"
+                },
+                "feedback": {
+                    "type": "string"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "intent": {
+                    "type": "string"
+                },
+                "kind": {
+                    "type": "string"
+                },
+                "problem": {
+                    "type": "string"
+                },
+                "source": {
+                    "type": "string"
+                },
+                "status": {
+                    "type": "string"
+                },
+                "title": {
+                    "type": "string"
+                }
+            }
+        },
+        "proto.UltraplanDiagramVerdict": {
+            "type": "object",
+            "properties": {
+                "accepted": {
+                    "type": "boolean"
+                },
+                "feedback": {
+                    "type": "string"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "source": {
+                    "type": "string"
+                }
+            }
+        },
+        "proto.UltraplanRespondResponse": {
+            "type": "object",
+            "properties": {
+                "resolved": {
+                    "type": "boolean"
+                }
+            }
+        },
+        "proto.UltraplanReviewResponse": {
+            "type": "object",
+            "properties": {
+                "feedback": {
+                    "type": "string"
+                },
+                "request_id": {
+                    "type": "string"
+                },
+                "start_implementation": {
+                    "type": "boolean"
+                },
+                "verdicts": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/proto.UltraplanDiagramVerdict"
+                    }
+                }
+            }
+        },
+        "proto.UltraplanStartRequest": {
+            "type": "object",
+            "properties": {
+                "goal": {
+                    "type": "string"
+                },
+                "session_id": {
+                    "type": "string"
+                }
+            }
+        },
+        "proto.UltraplanStartResponse": {
+            "type": "object",
+            "properties": {
+                "started": {
+                    "type": "boolean"
                 }
             }
         },

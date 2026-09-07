@@ -12,6 +12,7 @@ import (
 	"github.com/charmbracelet/crush/internal/db"
 	"github.com/charmbracelet/crush/internal/event"
 	"github.com/charmbracelet/crush/internal/pubsub"
+	"github.com/charmbracelet/crush/internal/ultraplan"
 	"github.com/google/uuid"
 	"github.com/zeebo/xxh3"
 )
@@ -58,8 +59,11 @@ type Session struct {
 	SummaryMessageID string
 	Cost             float64
 	Todos            []Todo
-	CreatedAt        int64
-	UpdatedAt        int64
+	// Plan holds the Ultraplan diagram set for this session, or nil
+	// when no planning session has been started.
+	Plan      *ultraplan.Plan
+	CreatedAt int64
+	UpdatedAt int64
 }
 
 type Service interface {
@@ -193,6 +197,10 @@ func (s *service) Save(ctx context.Context, session Session) (Session, error) {
 	if err != nil {
 		return Session{}, err
 	}
+	planJSON, err := marshalPlan(session.Plan)
+	if err != nil {
+		return Session{}, err
+	}
 
 	dbSession, err := s.q.UpdateSession(ctx, db.UpdateSessionParams{
 		ID:               session.ID,
@@ -207,6 +215,10 @@ func (s *service) Save(ctx context.Context, session Session) (Session, error) {
 		Todos: sql.NullString{
 			String: todosJSON,
 			Valid:  todosJSON != "",
+		},
+		Plan: sql.NullString{
+			String: planJSON,
+			Valid:  planJSON != "",
 		},
 	})
 	if err != nil {
@@ -300,6 +312,10 @@ func (s *service) fromDBItem(item db.Session) Session {
 	if err != nil {
 		slog.Error("Failed to unmarshal todos", "session_id", item.ID, "error", err)
 	}
+	plan, err := unmarshalPlan(item.Plan.String)
+	if err != nil {
+		slog.Error("Failed to unmarshal plan", "session_id", item.ID, "error", err)
+	}
 	return Session{
 		ID:               item.ID,
 		ParentSessionID:  item.ParentSessionID.String,
@@ -310,6 +326,7 @@ func (s *service) fromDBItem(item db.Session) Session {
 		SummaryMessageID: item.SummaryMessageID.String,
 		Cost:             item.Cost,
 		Todos:            todos,
+		Plan:             plan,
 		CreatedAt:        item.CreatedAt,
 		UpdatedAt:        item.UpdatedAt,
 	}
@@ -335,6 +352,28 @@ func unmarshalTodos(data string) ([]Todo, error) {
 		return []Todo{}, err
 	}
 	return todos, nil
+}
+
+func marshalPlan(plan *ultraplan.Plan) (string, error) {
+	if plan == nil {
+		return "", nil
+	}
+	data, err := json.Marshal(plan)
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+
+func unmarshalPlan(data string) (*ultraplan.Plan, error) {
+	if data == "" {
+		return nil, nil
+	}
+	var plan ultraplan.Plan
+	if err := json.Unmarshal([]byte(data), &plan); err != nil {
+		return nil, err
+	}
+	return &plan, nil
 }
 
 func NewService(q *db.Queries, conn *sql.DB) Service {

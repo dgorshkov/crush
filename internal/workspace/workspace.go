@@ -23,6 +23,7 @@ import (
 	"github.com/charmbracelet/crush/internal/question"
 	"github.com/charmbracelet/crush/internal/session"
 	"github.com/charmbracelet/crush/internal/skills"
+	"github.com/charmbracelet/crush/internal/ultraplan"
 )
 
 // Reasons the coder agent may be unavailable, returned by
@@ -181,6 +182,23 @@ type Workspace interface {
 
 	// QuestionCancel cancels the pending question.
 	QuestionCancel() bool
+
+	// Ultraplan
+	//
+	// UltraplanRespond resolves the pending diagram review.
+	UltraplanRespond(resp ultraplan.ReviewResponse) bool
+
+	// UltraplanCancel abandons the pending diagram review.
+	UltraplanCancel() bool
+
+	// UltraplanStart opens a planning session on a session, recording
+	// the goal being planned. It reports false when a planning session
+	// is already open.
+	UltraplanStart(ctx context.Context, sessionID, goal string) bool
+
+	// UltraplanAbandon ends the planning session on a session without
+	// accepting the plan. It reports false when none was open.
+	UltraplanAbandon(ctx context.Context, sessionID string) bool
 
 	// FileTracker
 	FileTrackerRecordRead(ctx context.Context, sessionID, path string)

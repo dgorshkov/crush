@@ -39,6 +39,7 @@ import (
 	"github.com/charmbracelet/crush/internal/skills"
 	"github.com/charmbracelet/crush/internal/ui/anim"
 	"github.com/charmbracelet/crush/internal/ui/styles"
+	"github.com/charmbracelet/crush/internal/ultraplan"
 	"github.com/charmbracelet/crush/internal/update"
 	"github.com/charmbracelet/crush/internal/version"
 	"github.com/charmbracelet/x/ansi"
@@ -58,6 +59,7 @@ type App struct {
 	History     history.Service
 	Permissions permission.Service
 	Questions   question.Service
+	Reviews     ultraplan.Service
 	FileTracker filetracker.Service
 
 	AgentCoordinator agent.Coordinator
@@ -112,6 +114,7 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore, skillsMgr
 		History:     files,
 		Permissions: permission.NewPermissionService(store.WorkingDir(), skipPermissionsRequests, allowedTools),
 		Questions:   question.NewService(),
+		Reviews:     ultraplan.NewService(),
 		FileTracker: filetracker.NewService(q),
 		LSPManager:  lsp.NewManager(store),
 		Skills:      skillsMgr,
@@ -594,6 +597,8 @@ func (app *App) setupEvents() {
 	setupSubscriberMustDeliver(ctx, app.serviceEventsWG, "permissions-notifications", app.Permissions.SubscribeNotifications, app.events)
 	setupSubscriberMustDeliver(ctx, app.serviceEventsWG, "question-batches", app.Questions.Subscribe, app.events)
 	setupSubscriberMustDeliver(ctx, app.serviceEventsWG, "question-notifications", app.Questions.SubscribeNotifications, app.events)
+	setupSubscriberMustDeliver(ctx, app.serviceEventsWG, "ultraplan-reviews", app.Reviews.Subscribe, app.events)
+	setupSubscriberMustDeliver(ctx, app.serviceEventsWG, "ultraplan-notifications", app.Reviews.SubscribeNotifications, app.events)
 	setupSubscriber(ctx, app.serviceEventsWG, "history", app.History.Subscribe, app.events)
 	setupSubscriber(ctx, app.serviceEventsWG, "agent-notifications", app.agentNotifications.Subscribe, app.events)
 	setupSubscriberMustDeliver(ctx, app.serviceEventsWG, "run-completions", app.runCompletions.Subscribe, app.events)
@@ -690,6 +695,7 @@ func (app *App) initCoderAgent(ctx context.Context, interactive bool) error {
 		Messages:    app.Messages,
 		Permissions: app.Permissions,
 		Questions:   app.Questions,
+		Reviews:     app.Reviews,
 		History:     app.History,
 		FileTracker: app.FileTracker,
 		LSPManager:  app.LSPManager,

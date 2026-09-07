@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -23,6 +24,7 @@ import (
 	"github.com/charmbracelet/crush/internal/session"
 	"github.com/charmbracelet/crush/internal/shell"
 	"github.com/charmbracelet/crush/internal/skills"
+	"github.com/charmbracelet/crush/internal/ultraplan"
 )
 
 // AppWorkspace implements the Workspace interface by delegating
@@ -272,6 +274,62 @@ func (w *AppWorkspace) QuestionAnswer(responses []question.Answer) bool {
 
 func (w *AppWorkspace) QuestionCancel() bool {
 	return w.app.Questions.Cancel()
+}
+
+// -- Ultraplan --
+
+func (w *AppWorkspace) UltraplanRespond(resp ultraplan.ReviewResponse) bool {
+	return w.app.Reviews.Respond(resp)
+}
+
+func (w *AppWorkspace) UltraplanCancel() bool {
+	return w.app.Reviews.Cancel()
+}
+
+func (w *AppWorkspace) UltraplanAbandon(ctx context.Context, sessionID string) bool {
+	if sessionID == "" {
+		return false
+	}
+	current, err := w.app.Sessions.Get(ctx, sessionID)
+	if err != nil {
+		slog.Error("Failed to read session to end a planning session", "error", err, "session_id", sessionID)
+		return false
+	}
+	if !current.Plan.Active() {
+		return false
+	}
+	// A review in flight has to be released too, or the agent stays
+	// blocked on a plan that no longer exists.
+	w.app.Reviews.Cancel()
+	current.Plan.Abandon()
+	if _, err := w.app.Sessions.Save(ctx, current); err != nil {
+		slog.Error("Failed to end a planning session", "error", err, "session_id", sessionID)
+		return false
+	}
+	return true
+}
+
+func (w *AppWorkspace) UltraplanStart(ctx context.Context, sessionID, goal string) bool {
+	if sessionID == "" {
+		return false
+	}
+	current, err := w.app.Sessions.Get(ctx, sessionID)
+	if err != nil {
+		slog.Error("Failed to read session to start a planning session", "error", err, "session_id", sessionID)
+		return false
+	}
+	if current.Plan.Active() {
+		return false
+	}
+	current.Plan = &ultraplan.Plan{
+		Status: ultraplan.StatusDrafting,
+		Goal:   strings.TrimSpace(goal),
+	}
+	if _, err := w.app.Sessions.Save(ctx, current); err != nil {
+		slog.Error("Failed to start a planning session", "error", err, "session_id", sessionID)
+		return false
+	}
+	return true
 }
 
 // -- FileTracker --

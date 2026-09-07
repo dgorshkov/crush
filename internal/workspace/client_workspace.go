@@ -29,6 +29,7 @@ import (
 	"github.com/charmbracelet/crush/internal/question"
 	"github.com/charmbracelet/crush/internal/session"
 	"github.com/charmbracelet/crush/internal/skills"
+	"github.com/charmbracelet/crush/internal/ultraplan"
 	"github.com/charmbracelet/crush/internal/version"
 	"github.com/charmbracelet/x/powernap/pkg/lsp/protocol"
 	"github.com/pkg/browser"
@@ -433,6 +434,69 @@ func (w *ClientWorkspace) QuestionCancel() bool {
 		return false
 	}
 	return cancelled
+}
+
+// -- Ultraplan --
+
+// UltraplanRespond submits a completed diagram review via the client
+// SDK.
+func (w *ClientWorkspace) UltraplanRespond(resp ultraplan.ReviewResponse) bool {
+	protoResp := proto.UltraplanReviewResponse{
+		RequestID:           resp.RequestID,
+		Feedback:            resp.Feedback,
+		StartImplementation: resp.StartImplementation,
+		Verdicts:            make([]proto.UltraplanDiagramVerdict, len(resp.Verdicts)),
+	}
+	for i, v := range resp.Verdicts {
+		protoResp.Verdicts[i] = proto.UltraplanDiagramVerdict{
+			ID:       v.ID,
+			Accepted: v.Accepted,
+			Source:   v.Source,
+			Feedback: v.Feedback,
+		}
+	}
+	resolved, err := w.client.RespondUltraplanReview(context.Background(), w.workspaceID(), protoResp)
+	if err != nil {
+		slog.Error("Failed to respond to the plan review", "error", err)
+		return false
+	}
+	return resolved
+}
+
+// UltraplanCancel abandons the pending diagram review via the client
+// SDK.
+func (w *ClientWorkspace) UltraplanCancel() bool {
+	cancelled, err := w.client.CancelUltraplanReview(context.Background(), w.workspaceID())
+	if err != nil {
+		slog.Error("Failed to cancel the plan review", "error", err)
+		return false
+	}
+	return cancelled
+}
+
+// UltraplanAbandon ends a planning session via the client SDK.
+func (w *ClientWorkspace) UltraplanAbandon(ctx context.Context, sessionID string) bool {
+	abandoned, err := w.client.AbandonUltraplan(ctx, w.workspaceID(), proto.UltraplanAbandonRequest{
+		SessionID: sessionID,
+	})
+	if err != nil {
+		slog.Error("Failed to end a planning session", "error", err)
+		return false
+	}
+	return abandoned
+}
+
+// UltraplanStart opens a planning session via the client SDK.
+func (w *ClientWorkspace) UltraplanStart(ctx context.Context, sessionID, goal string) bool {
+	started, err := w.client.StartUltraplan(ctx, w.workspaceID(), proto.UltraplanStartRequest{
+		SessionID: sessionID,
+		Goal:      goal,
+	})
+	if err != nil {
+		slog.Error("Failed to start a planning session", "error", err)
+		return false
+	}
+	return started
 }
 
 // -- FileTracker --
@@ -1141,6 +1205,26 @@ func (w *ClientWorkspace) translateEvent(ev any) tea.Msg {
 				BatchID: e.Payload.BatchID,
 			},
 		}
+	case pubsub.Event[proto.UltraplanReviewRequest]:
+		return pubsub.Event[ultraplan.ReviewRequest]{
+			Type: e.Type,
+			Payload: ultraplan.ReviewRequest{
+				ID:         e.Payload.ID,
+				SessionID:  e.Payload.SessionID,
+				ToolCallID: e.Payload.ToolCallID,
+				Goal:       e.Payload.Goal,
+				Summary:    e.Payload.Summary,
+				Round:      e.Payload.Round,
+				Diagrams:   protoDiagramsToDomain(e.Payload.Diagrams),
+			},
+		}
+	case pubsub.Event[proto.UltraplanNotification]:
+		return pubsub.Event[ultraplan.Notification]{
+			Type: e.Type,
+			Payload: ultraplan.Notification{
+				RequestID: e.Payload.RequestID,
+			},
+		}
 	case pubsub.Event[proto.Message]:
 		return pubsub.Event[message.Message]{
 			Type:    e.Type,
@@ -1244,8 +1328,25 @@ func protoToSession(s proto.Session) session.Session {
 		CompletionTokens: s.CompletionTokens,
 		Cost:             s.Cost,
 		Todos:            protoToTodos(s.Todos),
+		Plan:             protoToPlan(s.Plan),
 		CreatedAt:        s.CreatedAt,
 		UpdatedAt:        s.UpdatedAt,
+	}
+}
+
+// protoToPlan converts a wire-format Ultraplan plan to the domain type.
+func protoToPlan(plan *proto.Plan) *ultraplan.Plan {
+	if plan == nil {
+		return nil
+	}
+	return &ultraplan.Plan{
+		Status:       ultraplan.Status(plan.Status),
+		Goal:         plan.Goal,
+		Summary:      plan.Summary,
+		Diagrams:     protoDiagramsToDomain(plan.Diagrams),
+		Round:        plan.Round,
+		Implementing: plan.Implementing,
+		UpdatedAt:    plan.UpdatedAt,
 	}
 }
 
@@ -1370,6 +1471,7 @@ func sessionToProto(s session.Session) proto.Session {
 		CompletionTokens: s.CompletionTokens,
 		Cost:             s.Cost,
 		Todos:            todosToProto(s.Todos),
+		Plan:             planToProto(s.Plan),
 		CreatedAt:        s.CreatedAt,
 		UpdatedAt:        s.UpdatedAt,
 	}
@@ -1407,6 +1509,68 @@ func todosToProto(todos []session.Todo) []proto.Todo {
 			Content:    t.Content,
 			Status:     string(t.Status),
 			ActiveForm: t.ActiveForm,
+		}
+	}
+	return out
+}
+
+// planToProto converts an Ultraplan plan to its wire format so a
+// client-side save carries the plan back to the server intact.
+func planToProto(plan *ultraplan.Plan) *proto.Plan {
+	if plan == nil {
+		return nil
+	}
+	return &proto.Plan{
+		Status:       string(plan.Status),
+		Goal:         plan.Goal,
+		Summary:      plan.Summary,
+		Diagrams:     diagramsToProto(plan.Diagrams),
+		Round:        plan.Round,
+		Implementing: plan.Implementing,
+		UpdatedAt:    plan.UpdatedAt,
+	}
+}
+
+// diagramsToProto converts Ultraplan diagrams to their wire format.
+func diagramsToProto(diagrams []ultraplan.Diagram) []proto.UltraplanDiagram {
+	if len(diagrams) == 0 {
+		return nil
+	}
+	out := make([]proto.UltraplanDiagram, len(diagrams))
+	for i, d := range diagrams {
+		out[i] = proto.UltraplanDiagram{
+			ID:           d.ID,
+			Title:        d.Title,
+			Kind:         d.Kind,
+			Source:       d.Source,
+			Intent:       d.Intent,
+			Status:       string(d.Status),
+			Feedback:     d.Feedback,
+			Problem:      d.Problem,
+			EditedByUser: d.EditedByUser,
+		}
+	}
+	return out
+}
+
+// protoDiagramsToDomain converts wire-format Ultraplan diagrams back
+// to the domain type.
+func protoDiagramsToDomain(diagrams []proto.UltraplanDiagram) []ultraplan.Diagram {
+	if len(diagrams) == 0 {
+		return nil
+	}
+	out := make([]ultraplan.Diagram, len(diagrams))
+	for i, d := range diagrams {
+		out[i] = ultraplan.Diagram{
+			ID:           d.ID,
+			Title:        d.Title,
+			Kind:         d.Kind,
+			Source:       d.Source,
+			Intent:       d.Intent,
+			Status:       ultraplan.DiagramStatus(d.Status),
+			Feedback:     d.Feedback,
+			Problem:      d.Problem,
+			EditedByUser: d.EditedByUser,
 		}
 	}
 	return out

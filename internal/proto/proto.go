@@ -263,6 +263,85 @@ type QuestionNotification struct {
 	BatchID string `json:"batch_id"`
 }
 
+// UltraplanReviewRequest is the wire format for an Ultraplan diagram
+// set sent from server to client over SSE for review.
+type UltraplanReviewRequest struct {
+	ID         string             `json:"id"`
+	SessionID  string             `json:"session_id"`
+	ToolCallID string             `json:"tool_call_id"`
+	Goal       string             `json:"goal,omitempty"`
+	Summary    string             `json:"summary,omitempty"`
+	Round      int                `json:"round"`
+	Diagrams   []UltraplanDiagram `json:"diagrams"`
+}
+
+// UltraplanDiagram is a single Mermaid diagram within a plan.
+type UltraplanDiagram struct {
+	ID           string `json:"id"`
+	Title        string `json:"title"`
+	Kind         string `json:"kind,omitempty"`
+	Source       string `json:"source"`
+	Intent       string `json:"intent,omitempty"`
+	Status       string `json:"status"`
+	Feedback     string `json:"feedback,omitempty"`
+	Problem      string `json:"problem,omitempty"`
+	EditedByUser bool   `json:"edited_by_user,omitempty"`
+}
+
+// UltraplanReviewResponse is the wire format for a completed review,
+// sent from client to server via REST.
+type UltraplanReviewResponse struct {
+	RequestID           string                    `json:"request_id"`
+	Verdicts            []UltraplanDiagramVerdict `json:"verdicts"`
+	Feedback            string                    `json:"feedback,omitempty"`
+	StartImplementation bool                      `json:"start_implementation"`
+}
+
+// UltraplanDiagramVerdict is the user's ruling on one diagram.
+type UltraplanDiagramVerdict struct {
+	ID       string `json:"id"`
+	Accepted bool   `json:"accepted"`
+	Source   string `json:"source,omitempty"`
+	Feedback string `json:"feedback,omitempty"`
+}
+
+// UltraplanRespondResponse is the server's answer to a review
+// submission or cancellation.
+type UltraplanRespondResponse struct {
+	Resolved bool `json:"resolved"`
+}
+
+// UltraplanNotification is published when a review is resolved so
+// non-responding clients can dismiss their forms.
+type UltraplanNotification struct {
+	RequestID string `json:"request_id"`
+}
+
+// UltraplanStartRequest starts a planning session on a session,
+// recording the goal the user is planning towards.
+type UltraplanStartRequest struct {
+	SessionID string `json:"session_id"`
+	Goal      string `json:"goal,omitempty"`
+}
+
+// UltraplanStartResponse reports whether a planning session was
+// started.
+type UltraplanStartResponse struct {
+	Started bool `json:"started"`
+}
+
+// UltraplanAbandonRequest ends the planning session on a session
+// without accepting the plan.
+type UltraplanAbandonRequest struct {
+	SessionID string `json:"session_id"`
+}
+
+// UltraplanAbandonResponse reports whether a planning session was
+// ended.
+type UltraplanAbandonResponse struct {
+	Abandoned bool `json:"abandoned"`
+}
+
 // PermissionSkipRequest represents a request to skip permission prompts.
 type PermissionSkipRequest struct {
 	Skip bool `json:"skip"`

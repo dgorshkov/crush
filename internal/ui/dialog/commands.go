@@ -57,7 +57,11 @@ type Commands struct {
 	hasSession bool
 	hasTodos   bool
 	hasQueue   bool
-	selected   CommandType
+	// planState says whether a planning session is open, and whether
+	// Ultraplan is armed for the next prompt, so the command reads as
+	// the action it will actually take.
+	planState UltraplanState
+	selected  CommandType
 
 	spinner spinner.Model
 	loading bool
@@ -78,7 +82,31 @@ type Commands struct {
 var _ Dialog = (*Commands)(nil)
 
 // NewCommands creates a new commands dialog.
-func NewCommands(com *common.Common, sessionID string, hasSession, hasTodos, hasQueue bool, customCommands []commands.CustomCommand, mcpPrompts []commands.MCPPrompt) (*Commands, error) {
+// UltraplanState describes where a session stands with Ultraplan.
+type UltraplanState int
+
+const (
+	// UltraplanOff means no planning session and nothing armed.
+	UltraplanOff UltraplanState = iota
+	// UltraplanArmed means the next prompt opens a planning session.
+	UltraplanArmed
+	// UltraplanActive means a plan is being negotiated right now.
+	UltraplanActive
+)
+
+// ultraplanLabel names the command after what it will do.
+func (c *Commands) ultraplanLabel() string {
+	switch c.planState {
+	case UltraplanActive:
+		return "End Planning Session"
+	case UltraplanArmed:
+		return "Cancel Ultraplan"
+	default:
+		return "Ultraplan: Plan with Diagrams"
+	}
+}
+
+func NewCommands(com *common.Common, sessionID string, hasSession, hasTodos, hasQueue bool, planState UltraplanState, customCommands []commands.CustomCommand, mcpPrompts []commands.MCPPrompt) (*Commands, error) {
 	c := &Commands{
 		com:            com,
 		selected:       SystemCommands,
@@ -86,6 +114,7 @@ func NewCommands(com *common.Common, sessionID string, hasSession, hasTodos, has
 		hasSession:     hasSession,
 		hasTodos:       hasTodos,
 		hasQueue:       hasQueue,
+		planState:      planState,
 		customCommands: customCommands,
 		mcpPrompts:     mcpPrompts,
 	}
@@ -537,6 +566,7 @@ func (c *Commands) defaultCommands() []*CommandItem {
 	commands = append(
 		commands,
 		NewCommandItem(c.com.Styles, "toggle_yolo", "Toggle Yolo Mode", "ctrl+y", ActionToggleYoloMode{}),
+		NewCommandItem(c.com.Styles, "ultraplan", c.ultraplanLabel(), "", ActionToggleUltraplan{}).WithAliases("plan"),
 		NewCommandItem(c.com.Styles, "toggle_help", "Toggle Help", "ctrl+g", ActionToggleHelp{}),
 		NewCommandItem(c.com.Styles, "init", "Initialize Project", "", ActionInitializeProject{}),
 	)

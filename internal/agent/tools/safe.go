@@ -74,6 +74,26 @@ func containsCommandChaining(s string) bool {
 	})
 }
 
+// IsSafeReadOnlyCommand reports whether a shell command is one of the
+// known read-only commands, invoked without chaining or substitution.
+// A false return is not a claim that the command writes anything, only
+// that we cannot tell that it does not.
+func IsSafeReadOnlyCommand(command string) bool {
+	if containsCommandChaining(command) {
+		return false
+	}
+	lower := strings.ToLower(command)
+	for _, safe := range safeCommands {
+		if !strings.HasPrefix(lower, safe) {
+			continue
+		}
+		if len(lower) == len(safe) || lower[len(safe)] == ' ' || lower[len(safe)] == '-' {
+			return true
+		}
+	}
+	return false
+}
+
 func init() {
 	if runtime.GOOS == "windows" {
 		safeCommands = append(

@@ -40,6 +40,7 @@ import (
 	"github.com/charmbracelet/crush/internal/question"
 	"github.com/charmbracelet/crush/internal/session"
 	"github.com/charmbracelet/crush/internal/skills"
+	"github.com/charmbracelet/crush/internal/ultraplan"
 	"golang.org/x/sync/errgroup"
 
 	"charm.land/fantasy/providers/anthropic"
@@ -142,6 +143,7 @@ type coordinator struct {
 	messages    message.Service
 	permissions permission.Service
 	questions   question.Service
+	reviews     ultraplan.Service
 	history     history.Service
 	filetracker filetracker.Service
 	lspManager  *lsp.Manager
@@ -169,6 +171,7 @@ type CoordinatorOptions struct {
 	Messages    message.Service
 	Permissions permission.Service
 	Questions   question.Service
+	Reviews     ultraplan.Service
 	History     history.Service
 	FileTracker filetracker.Service
 	LSPManager  *lsp.Manager
@@ -198,6 +201,7 @@ func NewCoordinator(ctx context.Context, opts CoordinatorOptions) (Coordinator, 
 		messages:     opts.Messages,
 		permissions:  opts.Permissions,
 		questions:    opts.Questions,
+		reviews:      opts.Reviews,
 		history:      opts.History,
 		filetracker:  opts.FileTracker,
 		lspManager:   opts.LSPManager,
@@ -757,9 +761,13 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 		tools.NewWriteTool(c.lspManager, c.permissions, c.history, c.filetracker, c.cfg.WorkingDir()),
 	)
 
-	// Question tool is interactive-only and not available to sub-agents.
+	// The question and ultraplan tools both block on the user, so they
+	// are interactive-only and never handed to sub-agents.
 	if !isSubAgent && c.interactive {
 		allTools = append(allTools, tools.NewQuestionTool(c.questions))
+		if c.reviews != nil {
+			allTools = append(allTools, tools.NewUltraplanTool(c.sessions, c.reviews))
+		}
 	}
 
 	// Add LSP tools if user has configured LSPs or auto_lsp is enabled (nil or true).
@@ -824,6 +832,7 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 	// without hook interception to avoid firing the user's hook N times
 	// per delegated turn. The top-level invocation of the sub-agent tool
 	// itself is still wrapped from the coder's side.
+	filteredTools = wrapToolsWithUltraplanGate(filteredTools, c.sessions, isSubAgent)
 	filteredTools = wrapToolsWithHooks(filteredTools, hookRunner, isSubAgent)
 
 	return filteredTools, nil
