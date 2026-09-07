@@ -201,7 +201,8 @@ func TestPreviewRenderRoundTrip(t *testing.T) {
 	require.NotNil(t, state.img)
 	require.Empty(t, state.err)
 	require.False(t, review.renderInFlight)
-	require.NotEmpty(t, review.previewLines("flow"))
+	require.True(t, review.previewIsCurrent("flow", review.Request.Diagrams[0].Source))
+	require.True(t, review.showsPicture(0), "the expanded diagram should draw the picture")
 }
 
 func TestStaleRenderTicksAreDropped(t *testing.T) {
@@ -322,7 +323,7 @@ func TestEditingInvalidatesThePreview(t *testing.T) {
 	msg := review.HandleRenderTick(review.renderGen)()
 	runCmd(review.HandleRendered(msg.(UltraplanRenderedMsg)))
 	before := review.previews["flow"].sourceHash
-	require.NotEmpty(t, review.previewLines("flow"))
+	require.True(t, review.showsPicture(0))
 
 	// The same source must not re-render.
 	require.Nil(t, review.requestPreview(0, review.Request.Diagrams[0].Source),
@@ -334,14 +335,8 @@ func TestEditingInvalidatesThePreview(t *testing.T) {
 	require.NotEqual(t, before, sourceHash(review.Request.Diagrams[0].Source))
 	require.False(t, review.previewIsCurrent("flow", review.Request.Diagrams[0].Source),
 		"the picture no longer matches the edited source")
-
-	// The list falls back to the source rather than showing a picture
-	// of something else.
-	var shown string
-	for _, line := range review.buildLines(100) {
-		shown += line.text + "\n"
-	}
-	require.Contains(t, shown, "flowchart LR", "the list should show the edited source, not a stale picture")
+	require.False(t, review.showsPicture(0),
+		"the list must fall back to source rather than draw a stale picture")
 }
 
 func TestPreviewIDIsVersionedBySource(t *testing.T) {
@@ -365,13 +360,19 @@ func TestExpandedDiagramPrefersThePicture(t *testing.T) {
 	runCmd(review.HandleRendered(msg.(UltraplanRenderedMsg)))
 
 	require.True(t, review.expanded[0])
-	withPicture := len(review.buildLines(100))
+	require.True(t, review.showsPicture(0), "a freshly rendered diagram draws its picture")
 
 	// Toggling to source swaps the picture for the text.
 	press(t, review, "v")
 	require.True(t, review.showSource)
-	withSource := len(review.buildLines(100))
-	require.NotEqual(t, withPicture, withSource)
+	require.False(t, review.showsPicture(0), "the toggle puts the source back")
+
+	// And the source is what the list then holds.
+	var shown string
+	for _, line := range review.buildLines(100) {
+		shown += line.text + "\n"
+	}
+	require.Contains(t, shown, "flowchart TD")
 }
 
 func TestViewToggleDoesNothingWithoutARenderer(t *testing.T) {

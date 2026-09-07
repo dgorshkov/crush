@@ -377,6 +377,17 @@ func (r *UltraplanReview) handleImplementStageKey(msg tea.KeyPressMsg) (bool, te
 	return false, nil
 }
 
+// showsPicture reports whether the expanded view of diagram i draws a
+// picture rather than its source. It needs a current render and the
+// user not to have asked for source explicitly.
+func (r *UltraplanReview) showsPicture(i int) bool {
+	if i < 0 || i >= r.diagramCount() || r.showSource {
+		return false
+	}
+	d := r.Request.Diagrams[i]
+	return r.previewIsCurrent(d.ID, d.Source)
+}
+
 // previewForCursor asks for a picture of the diagram the cursor is on,
 // so moving through the list brings each one up without the user
 // having to ask.
@@ -738,10 +749,11 @@ func (r *UltraplanReview) pushDiagram(
 
 	if r.expanded[i] {
 		// The list is the record of what is being reviewed, so it only
-		// shows a picture that matches the source it stands for.
-		lines := r.previewLines(d.ID)
-		if len(lines) > 0 && r.previewIsCurrent(d.ID, d.Source) && !r.showSource {
-			for _, previewLine := range lines {
+		// shows a picture that matches the source it stands for. The
+		// currency check comes first: drawing a picture only to discard
+		// it costs a full repaint of the image.
+		if r.showsPicture(i) {
+			for _, previewLine := range r.previewLines(d.ID) {
 				push(previewLine, i)
 			}
 		} else {
