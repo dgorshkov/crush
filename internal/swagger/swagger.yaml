@@ -63,6 +63,16 @@ definitions:
       max_items:
         type: integer
     type: object
+  config.ExitBanner:
+    enum:
+    - default
+    - compact
+    - none
+    type: string
+    x-enum-varnames:
+    - ExitBannerDefault
+    - ExitBannerCompact
+    - ExitBannerNone
   config.HookConfig:
     properties:
       command:
@@ -182,6 +192,20 @@ definitions:
         description: |-
           OAuthToken is the persisted OAuth token for this server. It is
           managed internally and stored in the global data config.
+      sessionless:
+        description: |-
+          Sessionless marks a server that does not maintain an MCP session (it
+          never issues a Mcp-Session-Id). When true, Crush omits the
+          tools/prompts/resources list-changed handlers: the go-sdk opens a
+          SEP-2575 "subscriptions/listen" stream whenever any of those handlers
+          is set, and sessionless streamable-HTTP servers (e.g. GitHub MCP)
+          answer that POST with 404 ("session not found"), which the SDK treats
+          as fatal. The cost is no live list-changed notifications from this
+          server.
+
+          When nil, Crush auto-detects a set of known sessionless servers (see
+          IsSessionless); set it explicitly to override that detection.
+        type: boolean
       timeout:
         type: integer
       type:
@@ -264,6 +288,8 @@ definitions:
         $ref: '#/definitions/config.Completions'
       diff_mode:
         type: string
+      exit_banner:
+        $ref: '#/definitions/config.ExitBanner'
       scrollbar:
         type: string
       transparent:
@@ -396,6 +422,8 @@ definitions:
         type: string
       progress:
         type: boolean
+      request_timeout:
+        type: integer
       skills_paths:
         items:
           type: string
@@ -417,11 +445,21 @@ definitions:
         type: integer
       id:
         type: string
+      is_summary_message:
+        type: boolean
       model:
         type: string
       parts:
         items: {}
         type: array
+      prism_dollar_savings:
+        type: number
+      prism_hypercredit_savings:
+        type: number
+      prism_model_id:
+        type: string
+      prism_model_name:
+        type: string
       provider:
         type: string
       role:
@@ -523,6 +561,8 @@ definitions:
         type: integer
       parent_session_id:
         type: string
+      plan:
+        $ref: '#/definitions/proto.Plan'
       prompt_tokens:
         type: integer
       summary_message_id:
@@ -657,6 +697,14 @@ definitions:
       path:
         type: string
     type: object
+  proto.MCPAuthResponse:
+    properties:
+      auth_url:
+        description: |-
+          AuthURL is the OAuth authorization URL the user must visit, when
+          the flow is still in progress.
+        type: string
+    type: object
   proto.MCPClientInfo:
     properties:
       connected_at:
@@ -692,6 +740,13 @@ definitions:
   proto.MCPNameRequest:
     properties:
       name:
+        type: string
+    type: object
+  proto.MCPPendingAuthServer:
+    properties:
+      name:
+        type: string
+      url:
         type: string
     type: object
   proto.MCPPrompt:
@@ -800,6 +855,25 @@ definitions:
       skip:
         type: boolean
     type: object
+  proto.Plan:
+    properties:
+      diagrams:
+        items:
+          $ref: '#/definitions/proto.UltraplanDiagram'
+        type: array
+      goal:
+        type: string
+      implementing:
+        type: boolean
+      round:
+        type: integer
+      status:
+        type: string
+      summary:
+        type: string
+      updated_at:
+        type: integer
+    type: object
   proto.ProjectInitPromptResponse:
     properties:
       prompt:
@@ -878,6 +952,8 @@ definitions:
         type: integer
       parent_session_id:
         type: string
+      plan:
+        $ref: '#/definitions/proto.Plan'
       prompt_tokens:
         type: integer
       summary_message_id:
@@ -960,6 +1036,78 @@ definitions:
         type: string
       status:
         type: string
+    type: object
+  proto.UltraplanAbandonRequest:
+    properties:
+      session_id:
+        type: string
+    type: object
+  proto.UltraplanAbandonResponse:
+    properties:
+      abandoned:
+        type: boolean
+    type: object
+  proto.UltraplanDiagram:
+    properties:
+      edited_by_user:
+        type: boolean
+      feedback:
+        type: string
+      id:
+        type: string
+      intent:
+        type: string
+      kind:
+        type: string
+      problem:
+        type: string
+      source:
+        type: string
+      status:
+        type: string
+      title:
+        type: string
+    type: object
+  proto.UltraplanDiagramVerdict:
+    properties:
+      accepted:
+        type: boolean
+      feedback:
+        type: string
+      id:
+        type: string
+      source:
+        type: string
+    type: object
+  proto.UltraplanRespondResponse:
+    properties:
+      resolved:
+        type: boolean
+    type: object
+  proto.UltraplanReviewResponse:
+    properties:
+      feedback:
+        type: string
+      request_id:
+        type: string
+      start_implementation:
+        type: boolean
+      verdicts:
+        items:
+          $ref: '#/definitions/proto.UltraplanDiagramVerdict'
+        type: array
+    type: object
+  proto.UltraplanStartRequest:
+    properties:
+      goal:
+        type: string
+      session_id:
+        type: string
+    type: object
+  proto.UltraplanStartResponse:
+    properties:
+      started:
+        type: boolean
     type: object
   proto.VersionInfo:
     properties:
@@ -2063,6 +2211,71 @@ paths:
       summary: Stop all LSP servers
       tags:
       - lsp
+  /workspaces/{id}/mcp/auth:
+    post:
+      consumes:
+      - application/json
+      parameters:
+      - description: Workspace ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: MCP name request
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/proto.MCPNameRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/proto.MCPAuthResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/proto.Error'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/proto.Error'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/proto.Error'
+      summary: Authenticate an MCP server
+      tags:
+      - mcp
+  /workspaces/{id}/mcp/auth-url:
+    get:
+      parameters:
+      - description: Workspace ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: MCP server name
+        in: query
+        name: name
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/proto.MCPAuthResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/proto.Error'
+      summary: Get MCP OAuth authorization URL
+      tags:
+      - mcp
   /workspaces/{id}/mcp/docker/disable:
     post:
       parameters:
@@ -2143,6 +2356,34 @@ paths:
           schema:
             $ref: '#/definitions/proto.Error'
       summary: Get MCP prompt
+      tags:
+      - mcp
+  /workspaces/{id}/mcp/pending-auth:
+    get:
+      parameters:
+      - description: Workspace ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/proto.MCPPendingAuthServer'
+            type: array
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/proto.Error'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/proto.Error'
+      summary: Get MCP servers pending OAuth
       tags:
       - mcp
   /workspaces/{id}/mcp/prompts:
@@ -2990,4 +3231,140 @@ paths:
       summary: Read skill content
       tags:
       - skills
+  /workspaces/{id}/ultraplan/abandon:
+    post:
+      consumes:
+      - application/json
+      parameters:
+      - description: Workspace ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Session to release
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/proto.UltraplanAbandonRequest'
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/proto.UltraplanAbandonResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/proto.Error'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/proto.Error'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/proto.Error'
+      summary: End an Ultraplan planning session
+      tags:
+      - ultraplan
+  /workspaces/{id}/ultraplan/cancel:
+    post:
+      parameters:
+      - description: Workspace ID
+        in: path
+        name: id
+        required: true
+        type: string
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/proto.UltraplanRespondResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/proto.Error'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/proto.Error'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/proto.Error'
+      summary: Cancel an Ultraplan review
+      tags:
+      - ultraplan
+  /workspaces/{id}/ultraplan/respond:
+    post:
+      consumes:
+      - application/json
+      parameters:
+      - description: Workspace ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Diagram review response
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/proto.UltraplanReviewResponse'
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/proto.UltraplanRespondResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/proto.Error'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/proto.Error'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/proto.Error'
+      summary: Respond to an Ultraplan review
+      tags:
+      - ultraplan
+  /workspaces/{id}/ultraplan/start:
+    post:
+      consumes:
+      - application/json
+      parameters:
+      - description: Workspace ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Planning session goal
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/proto.UltraplanStartRequest'
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/proto.UltraplanStartResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/proto.Error'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/proto.Error'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/proto.Error'
+      summary: Start an Ultraplan planning session
+      tags:
+      - ultraplan
 swagger: "2.0"

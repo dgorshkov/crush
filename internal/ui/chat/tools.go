@@ -258,6 +258,8 @@ func NewToolMessageItem(
 		item = NewTodosToolMessageItem(sty, toolCall, result, canceled)
 	case tools.QuestionToolName:
 		item = NewQuestionToolMessageItem(sty, toolCall, result, canceled)
+	case tools.UltraplanToolName:
+		item = NewUltraplanToolMessageItem(sty, toolCall, result, canceled)
 	case tools.ReferencesToolName:
 		item = NewReferencesToolMessageItem(sty, toolCall, result, canceled)
 	case tools.DefinitionToolName:
@@ -1684,6 +1686,8 @@ func prettifyToolName(name string) string {
 		return "Sourcegraph"
 	case tools.TodosToolName:
 		return "To-Do"
+	case tools.UltraplanToolName:
+		return "Plan"
 	case tools.ViewToolName:
 		return "View"
 	case tools.WriteToolName:

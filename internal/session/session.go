@@ -12,6 +12,7 @@ import (
 	"github.com/charmbracelet/crush/internal/db"
 	"github.com/charmbracelet/crush/internal/event"
 	"github.com/charmbracelet/crush/internal/pubsub"
+	"github.com/charmbracelet/crush/internal/ultraplan"
 	"github.com/google/uuid"
 	"github.com/zeebo/xxh3"
 )
@@ -58,8 +59,11 @@ type Session struct {
 	SummaryMessageID string
 	Cost             float64
 	Todos            []Todo
-	CreatedAt        int64
-	UpdatedAt        int64
+	// Plan holds the Ultraplan diagram set for this session, or nil
+	// when no planning session has been started.
+	Plan      *ultraplan.Plan
+	CreatedAt int64
+	UpdatedAt int64
 }
 
 type Service interface {
@@ -71,6 +75,12 @@ type Service interface {
 	GetLast(ctx context.Context) (Session, error)
 	List(ctx context.Context) ([]Session, error)
 	Save(ctx context.Context, session Session) (Session, error)
+	// SavePlan writes only the Ultraplan plan column. A plan is saved
+	// after a review that blocked on the user for as long as they took,
+	// during which title generation and usage accounting will have
+	// written to the same row; a whole-session Save would roll those
+	// back.
+	SavePlan(ctx context.Context, sessionID string, plan *ultraplan.Plan) error
 	UpdateTitleAndUsage(ctx context.Context, sessionID, title string, promptTokens, completionTokens int64, cost float64) error
 	Rename(ctx context.Context, id string, title string) error
 	Delete(ctx context.Context, id string) error
@@ -193,6 +203,10 @@ func (s *service) Save(ctx context.Context, session Session) (Session, error) {
 	if err != nil {
 		return Session{}, err
 	}
+	planJSON, err := marshalPlan(session.Plan)
+	if err != nil {
+		return Session{}, err
+	}
 
 	dbSession, err := s.q.UpdateSession(ctx, db.UpdateSessionParams{
 		ID:               session.ID,
@@ -208,6 +222,10 @@ func (s *service) Save(ctx context.Context, session Session) (Session, error) {
 			String: todosJSON,
 			Valid:  todosJSON != "",
 		},
+		Plan: sql.NullString{
+			String: planJSON,
+			Valid:  planJSON != "",
+		},
 	})
 	if err != nil {
 		return Session{}, err
@@ -218,6 +236,26 @@ func (s *service) Save(ctx context.Context, session Session) (Session, error) {
 	session.EstimatedUsage = estimatedUsage
 	s.Publish(pubsub.UpdatedEvent, session)
 	return session, nil
+}
+
+// SavePlan updates only the plan column, leaving every other field on
+// the row untouched.
+func (s *service) SavePlan(ctx context.Context, sessionID string, plan *ultraplan.Plan) error {
+	planJSON, err := marshalPlan(plan)
+	if err != nil {
+		return err
+	}
+	if err := s.q.UpdateSessionPlan(ctx, db.UpdateSessionPlanParams{
+		ID: sessionID,
+		Plan: sql.NullString{
+			String: planJSON,
+			Valid:  planJSON != "",
+		},
+	}); err != nil {
+		return err
+	}
+	s.publishSessionUpdate(ctx, sessionID)
+	return nil
 }
 
 // UpdateTitleAndUsage updates only the title and usage fields atomically.
@@ -300,6 +338,10 @@ func (s *service) fromDBItem(item db.Session) Session {
 	if err != nil {
 		slog.Error("Failed to unmarshal todos", "session_id", item.ID, "error", err)
 	}
+	plan, err := unmarshalPlan(item.Plan.String)
+	if err != nil {
+		slog.Error("Failed to unmarshal plan", "session_id", item.ID, "error", err)
+	}
 	return Session{
 		ID:               item.ID,
 		ParentSessionID:  item.ParentSessionID.String,
@@ -310,6 +352,7 @@ func (s *service) fromDBItem(item db.Session) Session {
 		SummaryMessageID: item.SummaryMessageID.String,
 		Cost:             item.Cost,
 		Todos:            todos,
+		Plan:             plan,
 		CreatedAt:        item.CreatedAt,
 		UpdatedAt:        item.UpdatedAt,
 	}
@@ -335,6 +378,28 @@ func unmarshalTodos(data string) ([]Todo, error) {
 		return []Todo{}, err
 	}
 	return todos, nil
+}
+
+func marshalPlan(plan *ultraplan.Plan) (string, error) {
+	if plan == nil {
+		return "", nil
+	}
+	data, err := json.Marshal(plan)
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+
+func unmarshalPlan(data string) (*ultraplan.Plan, error) {
+	if data == "" {
+		return nil, nil
+	}
+	var plan ultraplan.Plan
+	if err := json.Unmarshal([]byte(data), &plan); err != nil {
+		return nil, err
+	}
+	return &plan, nil
 }
 
 func NewService(q *db.Queries, conn *sql.DB) Service {

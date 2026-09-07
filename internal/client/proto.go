@@ -207,6 +207,18 @@ func (c *Client) SubscribeEvents(ctx context.Context, id string) (<-chan any, er
 				if !sendEvent(ctx, events, e) {
 					return
 				}
+			case pubsub.PayloadTypeUltraplanReview:
+				var e pubsub.Event[proto.UltraplanReviewRequest]
+				_ = json.Unmarshal(p.Payload, &e)
+				if !sendEvent(ctx, events, e) {
+					return
+				}
+			case pubsub.PayloadTypeUltraplanNotification:
+				var e pubsub.Event[proto.UltraplanNotification]
+				_ = json.Unmarshal(p.Payload, &e)
+				if !sendEvent(ctx, events, e) {
+					return
+				}
 			case pubsub.PayloadTypeMessage:
 				var e pubsub.Event[proto.Message]
 				_ = json.Unmarshal(p.Payload, &e)
@@ -729,6 +741,78 @@ func (c *Client) CancelQuestionBatch(ctx context.Context, id string) (bool, erro
 		return false, fmt.Errorf("failed to decode cancel question batch response: %w", err)
 	}
 	return resp.Resolved, nil
+}
+
+// RespondUltraplanReview submits a completed diagram review on a
+// workspace. Returns true if this call resolved the pending review,
+// false if it was already resolved by another caller.
+func (c *Client) RespondUltraplanReview(ctx context.Context, id string, req proto.UltraplanReviewResponse) (bool, error) {
+	rsp, err := c.post(ctx, fmt.Sprintf("/workspaces/%s/ultraplan/respond", id), nil, jsonBody(req), http.Header{"Content-Type": []string{"application/json"}})
+	if err != nil {
+		return false, fmt.Errorf("failed to respond to ultraplan review: %w", err)
+	}
+	defer rsp.Body.Close()
+	if rsp.StatusCode != http.StatusOK {
+		return false, fmt.Errorf("failed to respond to ultraplan review: status code %d", rsp.StatusCode)
+	}
+	var resp proto.UltraplanRespondResponse
+	if err := json.NewDecoder(rsp.Body).Decode(&resp); err != nil {
+		return false, fmt.Errorf("failed to decode ultraplan review response: %w", err)
+	}
+	return resp.Resolved, nil
+}
+
+// CancelUltraplanReview abandons the pending diagram review on a
+// workspace. Returns true if a review was pending, false otherwise.
+func (c *Client) CancelUltraplanReview(ctx context.Context, id string) (bool, error) {
+	rsp, err := c.post(ctx, fmt.Sprintf("/workspaces/%s/ultraplan/cancel", id), nil, nil, http.Header{})
+	if err != nil {
+		return false, fmt.Errorf("failed to cancel ultraplan review: %w", err)
+	}
+	defer rsp.Body.Close()
+	if rsp.StatusCode != http.StatusOK {
+		return false, fmt.Errorf("failed to cancel ultraplan review: status code %d", rsp.StatusCode)
+	}
+	var resp proto.UltraplanRespondResponse
+	if err := json.NewDecoder(rsp.Body).Decode(&resp); err != nil {
+		return false, fmt.Errorf("failed to decode cancel ultraplan review response: %w", err)
+	}
+	return resp.Resolved, nil
+}
+
+// StartUltraplan opens a planning session on a session. Returns false
+// when one is already open.
+func (c *Client) StartUltraplan(ctx context.Context, id string, req proto.UltraplanStartRequest) (bool, error) {
+	rsp, err := c.post(ctx, fmt.Sprintf("/workspaces/%s/ultraplan/start", id), nil, jsonBody(req), http.Header{"Content-Type": []string{"application/json"}})
+	if err != nil {
+		return false, fmt.Errorf("failed to start ultraplan: %w", err)
+	}
+	defer rsp.Body.Close()
+	if rsp.StatusCode != http.StatusOK {
+		return false, fmt.Errorf("failed to start ultraplan: status code %d", rsp.StatusCode)
+	}
+	var resp proto.UltraplanStartResponse
+	if err := json.NewDecoder(rsp.Body).Decode(&resp); err != nil {
+		return false, fmt.Errorf("failed to decode start ultraplan response: %w", err)
+	}
+	return resp.Started, nil
+}
+
+// AbandonUltraplan ends a planning session without accepting the plan.
+func (c *Client) AbandonUltraplan(ctx context.Context, id string, req proto.UltraplanAbandonRequest) (bool, error) {
+	rsp, err := c.post(ctx, fmt.Sprintf("/workspaces/%s/ultraplan/abandon", id), nil, jsonBody(req), http.Header{"Content-Type": []string{"application/json"}})
+	if err != nil {
+		return false, fmt.Errorf("failed to abandon ultraplan: %w", err)
+	}
+	defer rsp.Body.Close()
+	if rsp.StatusCode != http.StatusOK {
+		return false, fmt.Errorf("failed to abandon ultraplan: status code %d", rsp.StatusCode)
+	}
+	var resp proto.UltraplanAbandonResponse
+	if err := json.NewDecoder(rsp.Body).Decode(&resp); err != nil {
+		return false, fmt.Errorf("failed to decode abandon ultraplan response: %w", err)
+	}
+	return resp.Abandoned, nil
 }
 
 // SetPermissionsSkipRequests sets the skip-requests flag for a workspace.

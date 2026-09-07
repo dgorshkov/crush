@@ -48,9 +48,16 @@ SET
     completion_tokens = ?,
     summary_message_id = ?,
     cost = ?,
-    todos = ?
+    todos = ?,
+    plan = ?
 WHERE id = ?
 RETURNING *;
+
+-- name: UpdateSessionPlan :exec
+UPDATE sessions
+SET
+    plan = ?
+WHERE id = ?;
 
 -- name: UpdateSessionTitleAndUsage :exec
 UPDATE sessions

@@ -36,6 +36,11 @@ internal/
     runner.go                      Parallel hook execution, timeout, dedup
     input.go                       Stdin payload builder, env vars, stdout parsing (Crush + Claude Code compat)
   session/session.go               Session CRUD backed by SQLite
+  ultraplan/                       Ultraplan mode: Mermaid diagram plans
+    ultraplan.go                   Plan/Diagram types and round semantics
+    mermaid.go                     Structural Mermaid validator
+    service.go                     Blocking diagram review (mirrors question/)
+    mermaidcli/                    Optional PNG rendering via the Mermaid CLI
   message/                         Message model and content types
   db/                              SQLite via sqlc, with migrations
     sql/                           Raw SQL queries (consumed by sqlc)

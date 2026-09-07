@@ -18,6 +18,7 @@ import (
 	"github.com/charmbracelet/crush/internal/question"
 	"github.com/charmbracelet/crush/internal/session"
 	"github.com/charmbracelet/crush/internal/skills"
+	"github.com/charmbracelet/crush/internal/ultraplan"
 )
 
 // wrapEvent converts a raw tea.Msg (a pubsub.Event[T] from the app
@@ -97,6 +98,27 @@ func wrapEvent(ev any) *pubsub.Payload {
 			Type: e.Type,
 			Payload: proto.QuestionNotification{
 				BatchID: e.Payload.BatchID,
+			},
+		})
+	case pubsub.Event[ultraplan.ReviewRequest]:
+		slog.Info("Wrapping Ultraplan review event for SSE", "id", e.Payload.ID, "diagrams", len(e.Payload.Diagrams))
+		return envelope(pubsub.PayloadTypeUltraplanReview, pubsub.Event[proto.UltraplanReviewRequest]{
+			Type: e.Type,
+			Payload: proto.UltraplanReviewRequest{
+				ID:         e.Payload.ID,
+				SessionID:  e.Payload.SessionID,
+				ToolCallID: e.Payload.ToolCallID,
+				Goal:       e.Payload.Goal,
+				Summary:    e.Payload.Summary,
+				Round:      e.Payload.Round,
+				Diagrams:   diagramsToProto(e.Payload.Diagrams),
+			},
+		})
+	case pubsub.Event[ultraplan.Notification]:
+		return envelope(pubsub.PayloadTypeUltraplanNotification, pubsub.Event[proto.UltraplanNotification]{
+			Type: e.Type,
+			Payload: proto.UltraplanNotification{
+				RequestID: e.Payload.RequestID,
 			},
 		})
 	case pubsub.Event[message.Message]:
@@ -210,8 +232,25 @@ func sessionToProto(s session.Session) proto.Session {
 		CompletionTokens: s.CompletionTokens,
 		Cost:             s.Cost,
 		Todos:            todosToProto(s.Todos),
+		Plan:             planToProto(s.Plan),
 		CreatedAt:        s.CreatedAt,
 		UpdatedAt:        s.UpdatedAt,
+	}
+}
+
+// planToProto converts an Ultraplan plan to its wire format.
+func planToProto(plan *ultraplan.Plan) *proto.Plan {
+	if plan == nil {
+		return nil
+	}
+	return &proto.Plan{
+		Status:       string(plan.Status),
+		Goal:         plan.Goal,
+		Summary:      plan.Summary,
+		Diagrams:     diagramsToProto(plan.Diagrams),
+		Round:        plan.Round,
+		Implementing: plan.Implementing,
+		UpdatedAt:    plan.UpdatedAt,
 	}
 }
 
@@ -357,6 +396,28 @@ func messagesToProto(msgs []message.Message) []proto.Message {
 	out := make([]proto.Message, len(msgs))
 	for i, m := range msgs {
 		out[i] = messageToProto(m)
+	}
+	return out
+}
+
+// diagramsToProto converts Ultraplan diagrams to their wire format.
+func diagramsToProto(diagrams []ultraplan.Diagram) []proto.UltraplanDiagram {
+	if len(diagrams) == 0 {
+		return nil
+	}
+	out := make([]proto.UltraplanDiagram, len(diagrams))
+	for i, d := range diagrams {
+		out[i] = proto.UltraplanDiagram{
+			ID:           d.ID,
+			Title:        d.Title,
+			Kind:         d.Kind,
+			Source:       d.Source,
+			Intent:       d.Intent,
+			Status:       string(d.Status),
+			Feedback:     d.Feedback,
+			Problem:      d.Problem,
+			EditedByUser: d.EditedByUser,
+		}
 	}
 	return out
 }

@@ -538,6 +538,92 @@ To disable tools from MCP servers, see the [MCP config section](#mcps).
 You can also skip all permission prompts completely by running Crush with the
 `--yolo` flag. Be very, very careful with this feature.
 
+### Ultraplan: agreeing on the plan first
+
+For work where starting in the wrong place is expensive, Ultraplan mode makes
+Crush settle the design with you before it writes anything. The plan is a set
+of [Mermaid](https://mermaid.js.org) diagrams rather than prose, so what you
+are agreeing to is a picture you can argue with.
+
+Open the command palette and pick **Ultraplan: Plan with Diagrams**, then type
+what you want built. Crush reads the code, proposes a diagram set, and hands it
+to you for review. For each diagram you can:
+
+| Key      | Action                                                   |
+| -------- | -------------------------------------------------------- |
+| `a`      | accept it                                                 |
+| `A`      | accept everything                                         |
+| `c`      | ask for a change, in your own words                       |
+| `e`      | edit the Mermaid source in place                          |
+| `E`      | edit it in `$EDITOR` instead                              |
+| `space`  | expand or collapse it                                     |
+| `v`      | switch the expanded view between picture and source       |
+| `f`      | leave a note on the plan as a whole                       |
+| `enter`  | submit the round                                          |
+| `esc`    | end the planning session without accepting                |
+
+Pressing `e` opens the diagram's source in an editor inside the review.
+Validation runs on every keystroke, so a stray bracket is flagged as you type
+rather than after you save; `ctrl+s` applies the edit and `esc` discards it. An
+edited diagram always goes back for a fresh decision, since you have just
+changed what you would be accepting.
+
+### Seeing the diagrams drawn
+
+If the [Mermaid CLI](https://github.com/mermaid-js/mermaid-cli) is on your
+`PATH`, Crush draws the diagrams rather than only showing their source — in the
+review list, and beside the editor while you type, re-rendering shortly after
+you pause.
+
+```bash
+npm install -g @mermaid-js/mermaid-cli
+```
+
+This is entirely optional. Without it the review shows Mermaid source, which is
+what it does anyway for a diagram that does not currently parse. Pictures work
+in any terminal: where Kitty graphics are available Crush uses them, and
+elsewhere it falls back to a block-character rendering.
+
+A few environment variables adjust it:
+
+| Variable                           | Effect                                              |
+| ---------------------------------- | --------------------------------------------------- |
+| `CRUSH_MERMAID_THEME`              | Mermaid theme; defaults to `dark`                    |
+| `CRUSH_MERMAID_CLI`                | run a different binary instead of `mmdc`             |
+| `CRUSH_MERMAID_PUPPETEER_CONFIG`   | Puppeteer config file, for sandboxed environments    |
+
+The picture is never the thing you accept — the Mermaid source is. Where a
+render fails or lags behind an edit, the review says so instead of showing you
+a diagram that is not the one under review.
+
+Anything you leave unaccepted goes back to Crush with your feedback, and the
+next round shows up the same way. The diagram set is free to grow or shrink
+along the way: a plan often starts as one flowchart and ends up as three.
+
+The session ends only when every diagram is valid Mermaid **and** you have
+accepted all of them. At that point Crush asks whether to start implementing.
+Say no and nothing is touched; the accepted plan stays on the session, and you
+can pick it up whenever you like.
+
+While a plan is open, tools that change the workspace — `edit`, `write`,
+`multiedit`, `download`, the LSP refactors, and any shell command that isn't
+plainly read-only — are refused. Reading, searching and asking all still work,
+which is most of what planning is. The shell allow-list used here is
+deliberately narrower than the one that decides whether to prompt you for
+permission: it rejects redirection and anything that runs another command, so
+`timeout`, `nice` and `echo x > file` are all refused during planning. To leave
+without a plan, run the command again (it reads **End Planning Session**) or
+press `esc` in the review.
+
+Plans are stored on the session alongside its to-do list, so they survive
+restarts and are visible to every client attached to the workspace.
+
+Diagram sources are checked before they reach you: a missing diagram type,
+an unclosed `subgraph`, unbalanced brackets, and a few other reliable
+breakages are bounced straight back to the agent. The check is structural
+rather than a full Mermaid parse, so it catches the common failures without
+promising every accepted diagram renders.
+
 ### Disabling Skills
 
 You can prevent Crush from using certain skills entirely. Disabled skills are

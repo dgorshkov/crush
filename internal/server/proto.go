@@ -1109,6 +1109,121 @@ func (c *controllerV1) handlePostWorkspaceQuestionsCancel(w http.ResponseWriter,
 	jsonEncode(w, proto.QuestionAnswerResponse{Resolved: cancelled})
 }
 
+// handlePostWorkspaceUltraplanRespond submits a completed Ultraplan
+// diagram review.
+//
+//	@Summary		Respond to an Ultraplan review
+//	@Tags			ultraplan
+//	@Accept			json
+//	@Param			id		path	string							true	"Workspace ID"
+//	@Param			request	body	proto.UltraplanReviewResponse	true	"Diagram review response"
+//	@Success		200	{object}	proto.UltraplanRespondResponse
+//	@Failure		400	{object}	proto.Error
+//	@Failure		404	{object}	proto.Error
+//	@Failure		500	{object}	proto.Error
+//	@Router			/workspaces/{id}/ultraplan/respond [post]
+func (c *controllerV1) handlePostWorkspaceUltraplanRespond(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+
+	var req proto.UltraplanReviewResponse
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		c.server.logError(r, "Failed to decode request", "error", err)
+		jsonError(w, http.StatusBadRequest, "failed to decode request")
+		return
+	}
+
+	resolved, err := c.backend.RespondUltraplanReview(id, req)
+	if err != nil {
+		c.handleError(w, r, err)
+		return
+	}
+	jsonEncode(w, proto.UltraplanRespondResponse{Resolved: resolved})
+}
+
+// handlePostWorkspaceUltraplanCancel abandons the pending Ultraplan
+// review for a workspace.
+//
+//	@Summary		Cancel an Ultraplan review
+//	@Tags			ultraplan
+//	@Param			id	path	string	true	"Workspace ID"
+//	@Success		200	{object}	proto.UltraplanRespondResponse
+//	@Failure		400	{object}	proto.Error
+//	@Failure		404	{object}	proto.Error
+//	@Failure		500	{object}	proto.Error
+//	@Router			/workspaces/{id}/ultraplan/cancel [post]
+func (c *controllerV1) handlePostWorkspaceUltraplanCancel(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+
+	cancelled, err := c.backend.CancelUltraplanReview(id)
+	if err != nil {
+		c.handleError(w, r, err)
+		return
+	}
+	jsonEncode(w, proto.UltraplanRespondResponse{Resolved: cancelled})
+}
+
+// handlePostWorkspaceUltraplanStart opens a planning session on a
+// session.
+//
+//	@Summary		Start an Ultraplan planning session
+//	@Tags			ultraplan
+//	@Accept			json
+//	@Param			id		path	string						true	"Workspace ID"
+//	@Param			request	body	proto.UltraplanStartRequest	true	"Planning session goal"
+//	@Success		200	{object}	proto.UltraplanStartResponse
+//	@Failure		400	{object}	proto.Error
+//	@Failure		404	{object}	proto.Error
+//	@Failure		500	{object}	proto.Error
+//	@Router			/workspaces/{id}/ultraplan/start [post]
+func (c *controllerV1) handlePostWorkspaceUltraplanStart(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+
+	var req proto.UltraplanStartRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		c.server.logError(r, "Failed to decode request", "error", err)
+		jsonError(w, http.StatusBadRequest, "failed to decode request")
+		return
+	}
+
+	started, err := c.backend.StartUltraplan(r.Context(), id, req)
+	if err != nil {
+		c.handleError(w, r, err)
+		return
+	}
+	jsonEncode(w, proto.UltraplanStartResponse{Started: started})
+}
+
+// handlePostWorkspaceUltraplanAbandon ends a planning session without
+// accepting the plan.
+//
+//	@Summary		End an Ultraplan planning session
+//	@Tags			ultraplan
+//	@Accept			json
+//	@Param			id		path	string						true	"Workspace ID"
+//	@Param			request	body	proto.UltraplanAbandonRequest	true	"Session to release"
+//	@Success		200	{object}	proto.UltraplanAbandonResponse
+//	@Failure		400	{object}	proto.Error
+//	@Failure		404	{object}	proto.Error
+//	@Failure		500	{object}	proto.Error
+//	@Router			/workspaces/{id}/ultraplan/abandon [post]
+func (c *controllerV1) handlePostWorkspaceUltraplanAbandon(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+
+	var req proto.UltraplanAbandonRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		c.server.logError(r, "Failed to decode request", "error", err)
+		jsonError(w, http.StatusBadRequest, "failed to decode request")
+		return
+	}
+
+	abandoned, err := c.backend.AbandonUltraplan(r.Context(), id, req)
+	if err != nil {
+		c.handleError(w, r, err)
+		return
+	}
+	jsonEncode(w, proto.UltraplanAbandonResponse{Abandoned: abandoned})
+}
+
 // handlePostWorkspacePermissionsSkip sets whether to skip permission prompts.
 //
 //	@Summary		Set skip permissions

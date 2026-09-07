@@ -23,6 +23,7 @@ type Session struct {
 	SummaryMessageID string  `json:"summary_message_id"`
 	Cost             float64 `json:"cost"`
 	Todos            []Todo  `json:"todos,omitempty"`
+	Plan             *Plan   `json:"plan,omitempty"`
 	CreatedAt        int64   `json:"created_at"`
 	UpdatedAt        int64   `json:"updated_at"`
 	IsBusy           bool    `json:"is_busy"`
@@ -34,4 +35,16 @@ type Todo struct {
 	Content    string `json:"content"`
 	Status     string `json:"status"`
 	ActiveForm string `json:"active_form"`
+}
+
+// Plan represents an Ultraplan diagram plan on a session in the proto
+// layer.
+type Plan struct {
+	Status       string             `json:"status"`
+	Goal         string             `json:"goal,omitempty"`
+	Summary      string             `json:"summary,omitempty"`
+	Diagrams     []UltraplanDiagram `json:"diagrams,omitempty"`
+	Round        int                `json:"round"`
+	Implementing bool               `json:"implementing,omitempty"`
+	UpdatedAt    int64              `json:"updated_at,omitempty"`
 }
